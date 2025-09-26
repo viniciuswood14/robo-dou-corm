@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000"; // altere para sua URL Render
+const API_BASE = "https://robo-dou-corm.onrender.com"; // altere para sua URL Render
 
 async function processarXML() {
   const data = new Date().toISOString().slice(0,10);
