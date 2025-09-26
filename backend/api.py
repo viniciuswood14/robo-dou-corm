@@ -98,8 +98,8 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
     # tenta POST no login
     payload = {
-        LOGIN_USER_FIELD: INLABS_USER,
-        LOGIN_PASS_FIELD: INLABS_PASS,
+        "email": INLABS_USER,
+        "password": INLABS_PASS,
     }
     r = await client.post(INLABS_LOGIN_URL, data=payload)
     if r.status_code >= 400:
