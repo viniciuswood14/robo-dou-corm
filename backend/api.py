@@ -25,7 +25,7 @@ INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
 # Nome dos campos do form de login (ajuste se for diferente)
-LOGIN_USER_FIELD = os.getenv("INLABS_USER_FIELD", "username")
+LOGIN_USER_FIELD = os.getenv("INLABS_USER_FIELD", "email")
 LOGIN_PASS_FIELD = os.getenv("INLABS_PASS_FIELD", "password")
 
 DEFAULT_KEYWORDS = [
