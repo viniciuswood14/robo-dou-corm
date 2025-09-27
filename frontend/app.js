@@ -1,22 +1,3 @@
-(function checkPassword() {
-  const savedPassword = sessionStorage.getItem('dou_robot_auth');
-  const correctPassword = "marinha"; // <-- TROQUE AQUI
-
-  if (savedPassword === correctPassword) {
-    return; // Já autenticado nesta sessão
-  }
-
-  const inputPassword = prompt("Por favor, insira a senha de acesso:");
-  if (inputPassword === correctPassword) {
-    sessionStorage.setItem('dou_robot_auth', inputPassword);
-  } else {
-    document.body.innerHTML = "<h1>Acesso Negado</h1>";
-    throw new Error("Senha incorreta.");
-  }
-})();
-
-// O resto do seu código app.js vem depois...
-
 // 👉 Troque para a URL do seu backend no Render:
 const API_BASE = "https://robo-dou-corm.onrender.com";
 
