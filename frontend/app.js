@@ -6,7 +6,7 @@ const btnProcessar = el("btnProcessar");
 const btnCopiar = el("btnCopiar");
 const preview = el("preview");
 
-// valor padrão: hoje
+// Valor padrão: hoje
 (function initDate() {
   const today = new Date().toISOString().slice(0, 10);
   el("data").value = today;
@@ -15,7 +15,6 @@ const preview = el("preview");
 btnProcessar.addEventListener("click", async () => {
   const data = el("data").value.trim();
   const sections = el("sections").value.trim() || "DO1";
-  const keywordsRaw = el("keywords").value.trim();
 
   if (!data) {
     preview.textContent = "Informe a data (YYYY-MM-DD).";
@@ -25,20 +24,11 @@ btnProcessar.addEventListener("click", async () => {
   const fd = new FormData();
   fd.append("data", data);
   fd.append("sections", sections);
-  if (keywordsRaw) {
-    // valida JSON minimamente
-    try {
-      JSON.parse(keywordsRaw);
-      fd.append("keywords_json", keywordsRaw);
-    } catch {
-      preview.textContent = "keywords_json inválido. Exemplo: [\"Marinha\",\"Fundo Naval\"]";
-      return;
-    }
-  }
 
   btnProcessar.disabled = true;
   btnCopiar.disabled = true;
-  preview.textContent = "Coletando no INLABS e processando…";
+  preview.classList.add("loading");
+  preview.textContent = "Processando no INLABS, aguarde…";
 
   try {
     const res = await fetch(`${API_BASE}/processar-inlabs`, { method: "POST", body: fd });
@@ -58,6 +48,7 @@ btnProcessar.addEventListener("click", async () => {
     preview.textContent = `Falha na requisição: ${err.message || err}`;
   } finally {
     btnProcessar.disabled = false;
+    preview.classList.remove("loading");
   }
 });
 
@@ -65,13 +56,8 @@ btnCopiar.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(preview.textContent || "");
     btnCopiar.textContent = "Copiado!";
-    setTimeout(() => (btnCopiar.textContent = "Copiar texto"), 1200);
-  } catch {
-    // fallback
-    const ta = document.createElement("textarea");
-    ta.value = preview.textContent || "";
-    document.body.appendChild(ta);
-    ta.select(); document.execCommand("copy");
-    ta.remove();
+    setTimeout(() => (btnCopiar.textContent = "Copiar Relatório"), 1200);
+  } catch (err) {
+    alert("Falha ao copiar para a área de transferência.");
   }
 });
