@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 5.2 LÓGICA HÍBRIDA - MPO + ANOTAÇÃO ##########
+# ########## VERSÃO 5.5 - ANOTAÇÕES PADRONIZADAS (CONFORME SOLICITADO) ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v5.2 Híbrido Inteligente")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v5.5 Anotações Padronizadas")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -22,6 +22,10 @@ INLABS_BASE = os.getenv("INLABS_BASE", "https://inlabs.in.gov.br")
 INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", f"{INLABS_BASE}/login")
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
+
+# ====== FRASES PADRÃO PARA ANOTAÇÃO ======
+ANNOTATION_POSITIVE = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
+ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
 KEYWORDS_DIRECT_INTEREST = [
@@ -42,7 +46,6 @@ BROAD_IMPACT_KEYWORDS = [
     "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos",
     "diversos ministérios", "diversos ministerios"
 ]
-# String para identificar o MPO
 MPO_ORG_STRING = "ministério do planejamento e orçamento"
 
 class Publicacao(BaseModel):
@@ -50,7 +53,7 @@ class Publicacao(BaseModel):
     type: Optional[str] = None
     summary: Optional[str] = None
     raw: Optional[str] = None
-    direct_hit_keyword: Optional[str] = None # Novo campo para a anotação
+    relevance_reason: Optional[str] = None
 
 class ProcessResponse(BaseModel):
     date: str
@@ -76,9 +79,9 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append(f"📌 {p.type or 'Ato/Portaria'}")
         if p.summary: lines.append(p.summary)
         
-        # MUDANÇA: Lógica de anotação inteligente
-        if p.direct_hit_keyword:
-            lines.append(f"⚓ Para conhecimento. Menção direta à TAG: '{p.direct_hit_keyword}'")
+        # MUDANÇA: Usa a anotação longa e padronizada
+        if p.relevance_reason:
+            lines.append(f"⚓ {p.relevance_reason}")
         else:
             lines.append("⚓ Para conhecimento.")
         lines.append("")
@@ -108,25 +111,25 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
             
             is_relevant = False
-            hit_keyword = None # Armazena a TAG encontrada
+            reason = None
 
-            # MUDANÇA: Lógica de filtros em 3 camadas, incluindo a nova regra do MPO
+            # MUDANÇA: Atribui as frases padrão com base no filtro
             # Filtro 1: Interesse Direto
-            for kw in KEYWORDS_DIRECT_INTEREST:
-                if kw in search_content:
-                    is_relevant = True
-                    hit_keyword = kw
-                    break
+            if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
+                is_relevant = True
+                reason = ANNOTATION_POSITIVE
             
             # Filtro 2: Atos Orçamentários de Amplo Impacto
-            if not is_relevant and any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
+            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
                  any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
                 is_relevant = True
+                reason = ANNOTATION_NEGATIVE
 
-            # Filtro 3: NOVA REGRA - Qualquer ato orçamentário do MPO
-            if not is_relevant and MPO_ORG_STRING in organ.lower() and \
+            # Filtro 3: Qualquer ato orçamentário do MPO
+            elif MPO_ORG_STRING in organ.lower() and \
                  any(bkw in search_content for bkw in BUDGET_KEYWORDS):
                 is_relevant = True
+                reason = ANNOTATION_NEGATIVE
             
             if is_relevant:
                 final_summary = summary if summary else (full_text[:500] + '...' if len(full_text) > 500 else full_text)
@@ -135,7 +138,7 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
                     type=act_type if act_type else "Ato não identificado",
                     summary=final_summary,
                     raw=full_text,
-                    direct_hit_keyword=hit_keyword # Salva a TAG encontrada
+                    relevance_reason=reason
                 )
                 pubs.append(pub)
 
