@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 6.0 - DEFINITIVA (BASEADA NO RAIO-X) ##########
+# ########## VERSÃO 7.0 - ABORDAGEM PRAGMÁTICA FINAL ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v6.0 Definitiva")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v7.0 Pragmática")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -25,7 +25,8 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== FRASES PADRÃO PARA ANOTAÇÃO ======
 ANNOTATION_POSITIVE = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
-ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
+# NOVA ANOTAÇÃO PRAGMÁTICA
+ANNOTATION_MPO_BUDGET = "Ato orçamentário do MPO. Recomenda-se análise manual dos anexos para verificar o impacto na MB/MD."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
 KEYWORDS_DIRECT_INTEREST = [
@@ -102,8 +103,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
 
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
             
-            # CORREÇÃO DEFINITIVA: Usa o texto da tag <article> INTEIRA para a busca,
-            # garantindo que os anexos dentro da tag <Texto> sejam lidos.
             search_content = norm(art.get_text(strip=True)).lower()
             
             display_text = norm(body.get_text(strip=True))
@@ -119,17 +118,14 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
                 is_relevant = True
                 reason = ANNOTATION_POSITIVE
             
-            # Filtro 2: Atos Orçamentários de Amplo Impacto
-            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
-                 any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
-                is_relevant = True
-                reason = ANNOTATION_NEGATIVE
+            # Filtros 2 e 3 para atos orçamentários
+            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS):
+                is_broad = any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS)
+                is_mpo = MPO_ORG_STRING in organ.lower()
 
-            # Filtro 3: Qualquer ato orçamentário do MPO
-            elif MPO_ORG_STRING in organ.lower() and \
-                 any(bkw in search_content for bkw in BUDGET_KEYWORDS):
-                is_relevant = True
-                reason = ANNOTATION_NEGATIVE
+                if is_broad or is_mpo:
+                    is_relevant = True
+                    reason = ANNOTATION_MPO_BUDGET
             
             if is_relevant:
                 final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
@@ -223,6 +219,9 @@ async def processar_inlabs(
                 merged.append(p)
         
         texto = monta_whatsapp(merged, data)
+        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
+    finally:
+        await client.aclose()
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
