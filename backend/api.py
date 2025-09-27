@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v2.1 Inteligente")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v3.0 Inteligente")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,29 +25,30 @@ INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", f"{INLABS_BASE}/login")
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
-# ====== LISTAS DE PALAVRAS-CHAVE ATUALIZADAS ======
+# ====== NOVAS LISTAS DE PALAVRAS-CHAVE ======
+# Filtro 1: Palavras de interesse direto
 KEYWORDS_DIRECT_INTEREST = [
-    "classificação orçamentária", "Defesa", "Força Armanda", "Forças Armandas",
-    "militar", "militares", "Comandos da Marinha", "Comando da Marinha",
-    "Marinha do Brasil", "Fundo Naval", "Amazônia Azul Tecnologias de Defesa",
-    "Caixa de Construções de casas para o pessoal da marinha",
-    "Empresa Gerencial de Projetos Navais",
-    "Fundo de Desenvolvimento do Ensino Profissional Marítimo"
+    "defesa", "força armanda", "forças armandas", "militar", "militares", 
+    "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval", 
+    "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
+    "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo"
 ]
 
-BUDGET_MONITOR_ORGS = [
-    "ministério da fazenda", "ministério do planejamento", "presidência da república",
-    "atos do poder executivo"
-]
-
-# Lista refinada com base nos seus exemplos
+# Filtro 2: Termos orçamentários gerais
 BUDGET_KEYWORDS = [
     "crédito suplementar", "crédito extraordinário", "execução orçamentária",
     "lei orçamentária", "orçamentos fiscal", "reforço de dotações",
     "programação orçamentária e financeira", "altera grupos de natureza de despesa",
     "limites de movimentação", "limites de pagamento", "fontes de recursos",
-    "movimentação e empenho" # Termo adicionado
+    "movimentação e empenho", "classificação orçamentária"
 ]
+
+# Filtro 2: Palavras que indicam um ato de amplo alcance
+BROAD_IMPACT_KEYWORDS = [
+    "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos", 
+    "diversos ministérios", "diversos ministerios"
+]
+
 
 class Publicacao(BaseModel):
     date: Optional[str] = None
@@ -89,7 +90,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append("")
     return "\n".join(lines)
 
-def parse_xml_bytes(xml_bytes: bytes, direct_keywords: List[str], budget_orgs: List[str], budget_keywords: List[str]) -> List[Publicacao]:
+def parse_xml_bytes(xml_bytes: bytes, direct_keywords: List[str], budget_keywords: List[str], broad_impact_keywords: List[str]) -> List[Publicacao]:
     pubs: List[Publicacao] = []
     try:
         soup = BeautifulSoup(xml_bytes, 'lxml-xml')
@@ -104,15 +105,17 @@ def parse_xml_bytes(xml_bytes: bytes, direct_keywords: List[str], budget_orgs: L
             
             is_relevant = False
 
-            # Filtro 1: Interesse Direto
+            # Filtro 1: Interesse Direto (Marinha, Defesa, etc.)
             if any(kw.lower() in search_content for kw in direct_keywords):
                 is_relevant = True
 
-            # Filtro 2: Interesse Orçamentário Amplo
+            # Filtro 2: Atos Orçamentários de Amplo Impacto
             if not is_relevant:
-                # MUDANÇA PRINCIPAL AQUI: Verificamos o nome do órgão no conteúdo completo, não apenas na tag 'Orgao'
-                is_budget_org = any(org_name.lower() in search_content for org_name in budget_orgs)
-                if is_budget_org and any(bkw.lower() in search_content for bkw in budget_keywords):
+                contains_budget_term = any(bkw.lower() in search_content for bkw in budget_keywords)
+                has_broad_impact = any(bikw.lower() in search_content for bikw in broad_impact_keywords)
+                
+                # É relevante se for um ato orçamentário E de amplo impacto
+                if contains_budget_term and has_broad_impact:
                     is_relevant = True
             
             if is_relevant:
@@ -200,15 +203,19 @@ async def processar_inlabs(
     sections: Optional[str] = Form("DO1", description="Ex.: 'DO1' ou 'DO1,DO2,DO3'"),
     keywords_json: Optional[str] = Form(None)
 ):
+    # Lógica de keywords customizadas é mantida, mas a principal usará os filtros inteligentes
     if keywords_json:
-        custom_keywords = json.loads(keywords_json)
-        direct_keywords = custom_keywords
-        budget_orgs = []
-        budget_keywords = []
+        try:
+            custom_keywords = json.loads(keywords_json)
+            direct_keywords = custom_keywords
+            budget_keywords = []  # Desativa outros filtros se customizar
+            broad_impact_keywords = []
+        except:
+            raise HTTPException(status_code=400, detail="Formato de keywords_json inválido.")
     else:
         direct_keywords = KEYWORDS_DIRECT_INTEREST
-        budget_orgs = BUDGET_MONITOR_ORGS
         budget_keywords = BUDGET_KEYWORDS
+        broad_impact_keywords = BROAD_IMPACT_KEYWORDS
 
     secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
 
@@ -224,7 +231,7 @@ async def processar_inlabs(
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
             for blob in extract_xml_from_zip(zb):
-                pubs.extend(parse_xml_bytes(blob, direct_keywords, budget_orgs, budget_keywords))
+                pubs.extend(parse_xml_bytes(blob, direct_keywords, budget_keywords, broad_impact_keywords))
         
         seen: Set[str] = set()
         merged: List[Publicacao] = []
