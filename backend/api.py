@@ -9,11 +9,11 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# ####################################################################
-# ########## VERSÃO FINAL E FUNCIONAL DO ROBÔ DOU API (v4.1) ##########
-# ####################################################################
+# #############################################################
+# ########## VERSÃO 5.0 REFINADO - FOCO E LIMPEZA ##########
+# #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v4.1 Corrigido")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v5.0 Refinado")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -28,22 +28,19 @@ KEYWORDS_DIRECT_INTEREST = [
     "defesa", "força armanda", "forças armandas", "militar", "militares",
     "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
-    "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo"
+    "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
+    "programa nuclear brasileiro" # Adicionado com base no último output
 ]
 BUDGET_KEYWORDS = [
     "crédito suplementar", "crédito extraordinário", "execução orçamentária",
     "lei orçamentária", "orçamentos fiscal", "reforço de dotações",
     "programação orçamentária e financeira", "altera grupos de natureza de despesa",
     "limites de movimentação", "limites de pagamento", "fontes de recursos",
-    "movimentação e empenho", "classificação orçamentária"
+    "movimentação e empenho", "classificação orçamentária", "gestão fiscal"
 ]
 BROAD_IMPACT_KEYWORDS = [
     "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos",
     "diversos ministérios", "diversos ministerios"
-]
-BUDGET_MONITOR_ORGS = [
-    "ministério da fazenda", "ministério do planejamento", "presidência da república",
-    "atos do poder executivo"
 ]
 
 class Publicacao(BaseModel):
@@ -88,30 +85,33 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
 
         for art in articles:
             organ = norm(art.get('artCategory', ''))
-            
             body = art.find('body')
             if not body: continue
 
             act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
+            
+            # MUDANÇA 1: Ignorar artigos sem identificação (os anexos)
+            if not act_type:
+                continue
+
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
             full_text = norm(body.get_text(strip=True))
             
             if not summary:
                 match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', full_text, re.DOTALL | re.I)
-                if match:
-                    summary = norm(match.group(1))
+                if match: summary = norm(match.group(1))
 
             search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
             
             is_relevant = False
 
+            # MUDANÇA 2: Lógica de filtros mais estrita
+            # Filtro 1: Interesse Direto (Marinha, Defesa, etc.)
             if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
                 is_relevant = True
+            # Filtro 2: Atos Orçamentários de Amplo Impacto
             elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
                  any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
-                is_relevant = True
-            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
-                 any(org in search_content for org in BUDGET_MONITOR_ORGS):
                 is_relevant = True
             
             if is_relevant:
@@ -124,6 +124,7 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
     return pubs
 
 
+# Funções de login e download (sem alterações)
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
@@ -188,7 +189,6 @@ async def processar_inlabs(
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
-            # ESTA É A LINHA QUE FOI CORRIGIDA (adição de um '+')
             key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
             if key not in seen:
                 seen.add(key)
