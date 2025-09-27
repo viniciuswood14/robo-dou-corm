@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 5.1 POLIMENTO FINAL - REDUÇÃO DE RUÍDO ##########
+# ########## VERSÃO 5.2 LÓGICA HÍBRIDA - MPO + ANOTAÇÃO ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v5.1 Polimento Final")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v5.2 Híbrido Inteligente")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -25,8 +25,7 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
 KEYWORDS_DIRECT_INTEREST = [
-    "ministério da defesa", # MUDANÇA AQUI: de "defesa" para "ministério da defesa"
-    "força armanda", "forças armandas", "militar", "militares",
+    "ministério da defesa", "força armanda", "forças armandas", "militar", "militares",
     "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
     "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
@@ -43,12 +42,15 @@ BROAD_IMPACT_KEYWORDS = [
     "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos",
     "diversos ministérios", "diversos ministerios"
 ]
+# String para identificar o MPO
+MPO_ORG_STRING = "ministério do planejamento e orçamento"
 
 class Publicacao(BaseModel):
     organ: Optional[str] = None
     type: Optional[str] = None
     summary: Optional[str] = None
     raw: Optional[str] = None
+    direct_hit_keyword: Optional[str] = None # Novo campo para a anotação
 
 class ProcessResponse(BaseModel):
     date: str
@@ -73,7 +75,12 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append(f"▶️ {p.organ or 'Órgão'}")
         lines.append(f"📌 {p.type or 'Ato/Portaria'}")
         if p.summary: lines.append(p.summary)
-        lines.append("⚓ Para conhecimento.")
+        
+        # MUDANÇA: Lógica de anotação inteligente
+        if p.direct_hit_keyword:
+            lines.append(f"⚓ Para conhecimento. Menção direta à TAG: '{p.direct_hit_keyword}'")
+        else:
+            lines.append("⚓ Para conhecimento.")
         lines.append("")
     return "\n".join(lines)
 
@@ -90,13 +97,10 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             if not body: continue
 
             act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
-            
-            if not act_type:
-                continue
+            if not act_type: continue
 
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
             full_text = norm(body.get_text(strip=True))
-            
             if not summary:
                 match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', full_text, re.DOTALL | re.I)
                 if match: summary = norm(match.group(1))
@@ -104,17 +108,35 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
             
             is_relevant = False
+            hit_keyword = None # Armazena a TAG encontrada
 
-            # Lógica de filtros refinada
-            if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
-                is_relevant = True
-            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
+            # MUDANÇA: Lógica de filtros em 3 camadas, incluindo a nova regra do MPO
+            # Filtro 1: Interesse Direto
+            for kw in KEYWORDS_DIRECT_INTEREST:
+                if kw in search_content:
+                    is_relevant = True
+                    hit_keyword = kw
+                    break
+            
+            # Filtro 2: Atos Orçamentários de Amplo Impacto
+            if not is_relevant and any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
                  any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
+                is_relevant = True
+
+            # Filtro 3: NOVA REGRA - Qualquer ato orçamentário do MPO
+            if not is_relevant and MPO_ORG_STRING in organ.lower() and \
+                 any(bkw in search_content for bkw in BUDGET_KEYWORDS):
                 is_relevant = True
             
             if is_relevant:
                 final_summary = summary if summary else (full_text[:500] + '...' if len(full_text) > 500 else full_text)
-                pub = Publicacao(organ=organ if organ else "Órgão não identificado", type=act_type if act_type else "Ato não identificado", summary=final_summary, raw=full_text)
+                pub = Publicacao(
+                    organ=organ if organ else "Órgão não identificado",
+                    type=act_type if act_type else "Ato não identificado",
+                    summary=final_summary,
+                    raw=full_text,
+                    direct_hit_keyword=hit_keyword # Salva a TAG encontrada
+                )
                 pubs.append(pub)
 
     except Exception as e:
@@ -123,6 +145,7 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
 
 
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
+    # ... (código inalterado)
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
     try: await client.get(INLABS_BASE)
@@ -131,6 +154,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if r.status_code >= 400: await client.aclose(); raise HTTPException(status_code=502, detail=f"Falha de login no INLABS: HTTP {r.status_code}")
     return client
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
+    # ... (código inalterado)
     r = await client.get(INLABS_BASE); r.raise_for_status(); soup = BeautifulSoup(r.text, "html.parser"); cand_texts = [date, date.replace("-", "_"), date.replace("-", "")];
     for a in soup.find_all("a"):
         href = (a.get("href") or "").strip(); txt = (a.get_text() or "").strip(); hay = (txt + " " + href).lower()
@@ -139,20 +163,24 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     if rr.status_code == 200: return fallback_url
     raise HTTPException(status_code=404, detail=f"Não encontrei a pasta/listagem da data {date} após o login.")
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
+    # ... (código inalterado)
     url = await resolve_date_url(client, date); r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao abrir listagem {url}: HTTP {r.status_code}")
     return r.text
 def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
+    # ... (código inalterado)
     soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if href.lower().endswith(".zip") and any(sec in (a.get_text() or href).upper() for sec in wanted): links.append(urljoin(base_url_for_rel.rstrip("/") + "/", href))
     return sorted(list(set(links)))
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
+    # ... (código inalterado)
     r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao baixar ZIP {url}: HTTP {r.status_code}")
     return r.content
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
+    # ... (código inalterado)
     xml_blobs: List[bytes] = [];
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
