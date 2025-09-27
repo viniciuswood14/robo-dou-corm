@@ -9,11 +9,11 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# #############################################################
-# ########## VERSÃO 5.0 REFINADO - FOCO E LIMPEZA ##########
-# #############################################################
+# #####################################################################
+# ########## VERSÃO 5.1 POLIMENTO FINAL - REDUÇÃO DE RUÍDO ##########
+# #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v5.0 Refinado")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v5.1 Polimento Final")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -25,11 +25,12 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
 KEYWORDS_DIRECT_INTEREST = [
-    "defesa", "força armanda", "forças armandas", "militar", "militares",
+    "ministério da defesa", # MUDANÇA AQUI: de "defesa" para "ministério da defesa"
+    "força armanda", "forças armandas", "militar", "militares",
     "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
     "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
-    "programa nuclear brasileiro" # Adicionado com base no último output
+    "programa nuclear brasileiro"
 ]
 BUDGET_KEYWORDS = [
     "crédito suplementar", "crédito extraordinário", "execução orçamentária",
@@ -90,7 +91,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
 
             act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
             
-            # MUDANÇA 1: Ignorar artigos sem identificação (os anexos)
             if not act_type:
                 continue
 
@@ -105,11 +105,9 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             
             is_relevant = False
 
-            # MUDANÇA 2: Lógica de filtros mais estrita
-            # Filtro 1: Interesse Direto (Marinha, Defesa, etc.)
+            # Lógica de filtros refinada
             if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
                 is_relevant = True
-            # Filtro 2: Atos Orçamentários de Amplo Impacto
             elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
                  any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
                 is_relevant = True
@@ -124,7 +122,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
     return pubs
 
 
-# Funções de login e download (sem alterações)
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
