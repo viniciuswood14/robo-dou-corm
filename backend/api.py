@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 5.5 - ANOTAÇÕES PADRONIZADAS (CONFORME SOLICITADO) ##########
+# ########## VERSÃO 5.6 - LEITURA COMPLETA (INCLUINDO ANEXOS) ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v5.5 Anotações Padronizadas")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v5.6 Leitura Completa")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -78,8 +78,6 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append(f"▶️ {p.organ or 'Órgão'}")
         lines.append(f"📌 {p.type or 'Ato/Portaria'}")
         if p.summary: lines.append(p.summary)
-        
-        # MUDANÇA: Usa a anotação longa e padronizada
         if p.relevance_reason:
             lines.append(f"⚓ {p.relevance_reason}")
         else:
@@ -103,18 +101,21 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             if not act_type: continue
 
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
-            full_text = norm(body.get_text(strip=True))
+            
+            # MUDANÇA FUNDAMENTAL: Lê o texto da publicação INTEIRA (art) para a busca.
+            # Isso garante que o conteúdo dos anexos e tabelas seja incluído.
+            search_content = norm(art.get_text(strip=True)).lower()
+            
+            # O `full_text` para exibição ainda pode ser só do corpo principal, para ser mais limpo.
+            display_text = norm(body.get_text(strip=True))
             if not summary:
-                match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', full_text, re.DOTALL | re.I)
+                match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
                 if match: summary = norm(match.group(1))
 
-            search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
-            
             is_relevant = False
             reason = None
 
-            # MUDANÇA: Atribui as frases padrão com base no filtro
-            # Filtro 1: Interesse Direto
+            # Filtro 1: Interesse Direto (agora buscando no texto completo)
             if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
                 is_relevant = True
                 reason = ANNOTATION_POSITIVE
@@ -132,12 +133,12 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
                 reason = ANNOTATION_NEGATIVE
             
             if is_relevant:
-                final_summary = summary if summary else (full_text[:500] + '...' if len(full_text) > 500 else full_text)
+                final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
                 pub = Publicacao(
                     organ=organ if organ else "Órgão não identificado",
                     type=act_type if act_type else "Ato não identificado",
                     summary=final_summary,
-                    raw=full_text,
+                    raw=display_text,
                     relevance_reason=reason
                 )
                 pubs.append(pub)
