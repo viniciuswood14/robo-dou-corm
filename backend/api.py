@@ -9,11 +9,11 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# #############################################################
-# ########## VERSÃO FINAL E FUNCIONAL DO ROBÔ DOU API ##########
-# #############################################################
+# ####################################################################
+# ########## VERSÃO FINAL E FUNCIONAL DO ROBÔ DOU API (v4.1) ##########
+# ####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v4.0 Funcional")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v4.1 Corrigido")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -84,21 +84,18 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
     pubs: List[Publicacao] = []
     try:
         soup = BeautifulSoup(xml_bytes, 'lxml-xml')
-        # Descoberta 1: A tag correta é 'article' (minúscula e em inglês)
         articles = soup.find_all('article')
 
         for art in articles:
-            # Descoberta 2: O órgão está no atributo 'artCategory'
             organ = norm(art.get('artCategory', ''))
             
             body = art.find('body')
-            if not body: continue # Pula se não houver corpo de texto
+            if not body: continue
 
             act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
             full_text = norm(body.get_text(strip=True))
             
-            # Se a ementa estiver vazia, tenta pegar do texto (padrão comum)
             if not summary:
                 match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', full_text, re.DOTALL | re.I)
                 if match:
@@ -108,7 +105,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             
             is_relevant = False
 
-            # Lógica de Filtros em 3 Camadas
             if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
                 is_relevant = True
             elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
@@ -128,7 +124,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
     return pubs
 
 
-# Funções de login e download (sem alterações)
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
@@ -166,7 +161,6 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
             if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
     return xml_blobs
 
-
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
     data: str = Form(..., description="YYYY-MM-DD"),
@@ -181,25 +175,4 @@ async def processar_inlabs(
     try:
         listing_url = await resolve_date_url(client, data)
         html = await fetch_listing_html(client, data)
-        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
-        if not zip_links:
-            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
-        
-        pubs: List[Publicacao] = []
-        for zurl in zip_links:
-            zb = await download_zip(client, zurl)
-            for blob in extract_xml_from_zip(zb):
-                pubs.extend(parse_xml_bytes(blob))
-        
-        seen: Set[str] = set()
-        merged: List[Publicacao] = []
-        for p in pubs:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" (p.summary or "")[:100]
-            if key not in seen:
-                seen.add(key)
-                merged.append(p)
-        
-        texto = monta_whatsapp(merged, data)
-        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
-    finally:
-        await client.aclose()
+        zip_links = pick_zip_
