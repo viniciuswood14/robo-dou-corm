@@ -175,4 +175,26 @@ async def processar_inlabs(
     try:
         listing_url = await resolve_date_url(client, data)
         html = await fetch_listing_html(client, data)
-        zip_links = pick_zip_
+        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+        if not zip_links:
+            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
+        
+        pubs: List[Publicacao] = []
+        for zurl in zip_links:
+            zb = await download_zip(client, zurl)
+            for blob in extract_xml_from_zip(zb):
+                pubs.extend(parse_xml_bytes(blob))
+        
+        seen: Set[str] = set()
+        merged: List[Publicacao] = []
+        for p in pubs:
+            # ESTA É A LINHA QUE FOI CORRIGIDA (adição de um '+')
+            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            if key not in seen:
+                seen.add(key)
+                merged.append(p)
+        
+        texto = monta_whatsapp(merged, data)
+        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
+    finally:
+        await client.aclose()
