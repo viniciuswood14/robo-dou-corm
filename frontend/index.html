@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Robô DOU – INLABS</title>
+  <title>Robô DOU - Marinha do Brasil</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main class="card">
-    <h1>Robô DOU – INLABS</h1>
+    <header class="card-header">
+      <img src="logo-marinha.svg" alt="Logotipo da Marinha do Brasil" class="logo" />
+      <h1>Robô de Monitoramento do DOU</h1>
+    </header>
 
     <div class="row">
       <label for="data">Data (YYYY-MM-DD)</label>
@@ -22,16 +25,19 @@
 
     <details class="adv">
       <summary>Opções avançadas (palavras-chave)</summary>
-      <p class="hint">Se deixar vazio, o backend usa o conjunto padrão (PRONAPA, PCFT, PNM, Fundo Naval, etc.).</p>
-      <textarea id="keywords" rows="3" placeholder='["Marinha","Fundo Naval"]'></textarea>
+      <p class="hint">Se deixar vazio, o backend usa o conjunto padrão de filtros inteligentes.</p>
+      <textarea id="keywords" rows="3" placeholder='["Marinha","Fundo Naval"]' disabled title="Desativado em favor da lógica inteligente do backend"></textarea>
     </details>
 
     <div class="actions">
-      <button id="btnProcessar">Processar no INLABS</button>
-      <button id="btnCopiar" disabled>Copiar texto</button>
+      <button id="btnProcessar">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        Processar no INLABS
+      </button>
+      <button id="btnCopiar" disabled>Copiar Relatório</button>
     </div>
 
-    <pre id="preview" class="preview" aria-live="polite"></pre>
+    <pre id="preview" class="preview" aria-live="polite">Aguardando comando...</pre>
   </main>
 
   <script src="app.js"></script>
