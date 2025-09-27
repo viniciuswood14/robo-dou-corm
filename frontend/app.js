@@ -1,6 +1,6 @@
 (function checkPassword() {
   const savedPassword = sessionStorage.getItem('dou_robot_auth');
-  const correctPassword = "sua_senha_secreta_aqui"; // <-- TROQUE AQUI
+  const correctPassword = "marinha"; // <-- TROQUE AQUI
 
   if (savedPassword === correctPassword) {
     return; // Já autenticado nesta sessão
