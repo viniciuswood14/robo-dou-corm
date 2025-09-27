@@ -1,18 +1,19 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-import os, io, zipfile
+from typing import List, Optional, Set
+from datetime import datetime
+import os, io, zipfile, json, re
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
-# ####################################################################
-# ########## VERSÃO DE DIAGNÓSTICO NÍVEL 2 - AMOSTRA DO XML ##########
-# ####################################################################
+# #############################################################
+# ########## VERSÃO FINAL E FUNCIONAL DO ROBÔ DOU API ##########
+# #############################################################
 
-app = FastAPI(title="Robô DOU API - MODO DIAGNÓSTICO NÍVEL 2")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v4.0 Funcional")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -22,16 +23,112 @@ INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", f"{INLABS_BASE}/login")
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
-class DummyPublication(BaseModel):
-    pass
+# ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
+KEYWORDS_DIRECT_INTEREST = [
+    "defesa", "força armanda", "forças armandas", "militar", "militares",
+    "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
+    "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
+    "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo"
+]
+BUDGET_KEYWORDS = [
+    "crédito suplementar", "crédito extraordinário", "execução orçamentária",
+    "lei orçamentária", "orçamentos fiscal", "reforço de dotações",
+    "programação orçamentária e financeira", "altera grupos de natureza de despesa",
+    "limites de movimentação", "limites de pagamento", "fontes de recursos",
+    "movimentação e empenho", "classificação orçamentária"
+]
+BROAD_IMPACT_KEYWORDS = [
+    "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos",
+    "diversos ministérios", "diversos ministerios"
+]
+BUDGET_MONITOR_ORGS = [
+    "ministério da fazenda", "ministério do planejamento", "presidência da república",
+    "atos do poder executivo"
+]
+
+class Publicacao(BaseModel):
+    organ: Optional[str] = None
+    type: Optional[str] = None
+    summary: Optional[str] = None
+    raw: Optional[str] = None
 
 class ProcessResponse(BaseModel):
     date: str
     count: int
-    publications: List[DummyPublication]
+    publications: List[Publicacao]
     whatsapp_text: str
 
-# Funções de login e download permanecem as mesmas
+_ws = re.compile(r"\s+")
+def norm(s: Optional[str]) -> str:
+    if not s: return ""
+    return _ws.sub(" ", s).strip()
+
+def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
+    lines = ["Bom dia!","","PTC as seguintes publicações de interesse:"]
+    try: dt = datetime.fromisoformat(when); dd = dt.strftime("%d%b").upper()
+    except Exception: dd = when
+    lines += [f"DOU {dd}:","", "🔰 Seção 1",""]
+    if not pubs:
+        lines.append("— Sem ocorrências para os critérios informados —")
+        return "\n".join(lines)
+    for p in pubs:
+        lines.append(f"▶️ {p.organ or 'Órgão'}")
+        lines.append(f"📌 {p.type or 'Ato/Portaria'}")
+        if p.summary: lines.append(p.summary)
+        lines.append("⚓ Para conhecimento.")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
+    pubs: List[Publicacao] = []
+    try:
+        soup = BeautifulSoup(xml_bytes, 'lxml-xml')
+        # Descoberta 1: A tag correta é 'article' (minúscula e em inglês)
+        articles = soup.find_all('article')
+
+        for art in articles:
+            # Descoberta 2: O órgão está no atributo 'artCategory'
+            organ = norm(art.get('artCategory', ''))
+            
+            body = art.find('body')
+            if not body: continue # Pula se não houver corpo de texto
+
+            act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
+            summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
+            full_text = norm(body.get_text(strip=True))
+            
+            # Se a ementa estiver vazia, tenta pegar do texto (padrão comum)
+            if not summary:
+                match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', full_text, re.DOTALL | re.I)
+                if match:
+                    summary = norm(match.group(1))
+
+            search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
+            
+            is_relevant = False
+
+            # Lógica de Filtros em 3 Camadas
+            if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
+                is_relevant = True
+            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
+                 any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
+                is_relevant = True
+            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
+                 any(org in search_content for org in BUDGET_MONITOR_ORGS):
+                is_relevant = True
+            
+            if is_relevant:
+                final_summary = summary if summary else (full_text[:500] + '...' if len(full_text) > 500 else full_text)
+                pub = Publicacao(organ=organ if organ else "Órgão não identificado", type=act_type if act_type else "Ato não identificado", summary=final_summary, raw=full_text)
+                pubs.append(pub)
+
+    except Exception as e:
+        pubs.append(Publicacao(type="Erro de Parsing", summary=f"Falha ao processar XML: {str(e)}", raw=xml_bytes.decode("utf-8", errors="ignore")[:1000]))
+    return pubs
+
+
+# Funções de login e download (sem alterações)
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
@@ -69,12 +166,17 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
             if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
     return xml_blobs
 
+
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
     data: str = Form(..., description="YYYY-MM-DD"),
     sections: Optional[str] = Form("DO1", description="Ex.: 'DO1' ou 'DO1,DO2,DO3'"),
+    keywords_json: Optional[str] = Form(None)
 ):
     secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
+    if keywords_json:
+        raise HTTPException(status_code=400, detail="Customização de keywords desativada em favor da lógica inteligente. Deixe o campo avançado em branco.")
+    
     client = await inlabs_login_and_get_session()
     try:
         listing_url = await resolve_date_url(client, data)
@@ -83,32 +185,21 @@ async def processar_inlabs(
         if not zip_links:
             raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
         
-        xml_snippet = "Nenhum arquivo XML foi encontrado nos ZIPs."
-
+        pubs: List[Publicacao] = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
-            xml_blobs = extract_xml_from_zip(zb)
-            
-            if xml_blobs:
-                # Pega o primeiro XML, decodifica e pega os primeiros 2000 caracteres
-                first_xml_content = xml_blobs[0]
-                xml_snippet = first_xml_content.decode('utf-8', errors='ignore')[:2000]
-                
-                # Monta o relatório de diagnóstico
-                report_lines = [
-                    "===== AMOSTRA DO PRIMEIRO ARQUIVO XML ENCONTRADO =====",
-                    f"\nExtraído do ZIP: {zurl}",
-                    "--------------------------------------------------",
-                    xml_snippet,
-                    "--------------------------------------------------",
-                    "\n===== FIM DA AMOSTRA ====="
-                ]
-                final_report = "\n".join(report_lines)
-                
-                return ProcessResponse(date=data, count=1, publications=[], whatsapp_text=final_report)
-
-        # Se o loop terminar sem encontrar nenhum XML
-        return ProcessResponse(date=data, count=0, publications=[], whatsapp_text=xml_snippet)
-
+            for blob in extract_xml_from_zip(zb):
+                pubs.extend(parse_xml_bytes(blob))
+        
+        seen: Set[str] = set()
+        merged: List[Publicacao] = []
+        for p in pubs:
+            key = (p.organ or "") + "||" + (p.type or "") + "||" (p.summary or "")[:100]
+            if key not in seen:
+                seen.add(key)
+                merged.append(p)
+        
+        texto = monta_whatsapp(merged, data)
+        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
