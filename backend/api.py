@@ -3,17 +3,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Set
 from datetime import datetime
-import os, io, zipfile, json, re
+import os, io, zipfile, json, re, unicodedata
 from urllib.parse import urljoin
+from collections import defaultdict
 
 import httpx
 from bs4 import BeautifulSoup
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v3.0 Inteligente")
+app = FastAPI(title="Robô DOU API (INLABS XML)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # depois restrinja para o domínio do seu frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,31 +26,34 @@ INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", f"{INLABS_BASE}/login")
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
-# ====== NOVAS LISTAS DE PALAVRAS-CHAVE ======
-# Filtro 1: Palavras de interesse direto
-KEYWORDS_DIRECT_INTEREST = [
-    "defesa", "força armanda", "forças armandas", "militar", "militares", 
-    "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval", 
-    "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
-    "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo"
+DO1_NAME = "DO1"
+MONEY_RE = re.compile(r"R\$\s*[\d\.\,]+")
+
+INCLUDE_TERMS = [
+    "classificação orçamentária",
+    "defesa",
+    "força armada", "forças armadas",
+    "militar", "militares",
+    "comando da marinha", "comandos da marinha",
+    "marinha do brasil",
+    "fundo naval",
+    "amazul", "amazônia azul tecnologias de defesa",
+    "emgepron", "empresa gerencial de projetos navais",
+    "caixa de construções de casas para o pessoal da marinha",
+    "fundo de desenvolvimento do ensino profissional marítimo",
+    # orçamentárias
+    "crédito suplementar", "crédito extraordinário",
+    "grupo de natureza de despesa", "gnd",
+    "modifica fontes", "fonte de recursos",
+    "emendas individuais", "emendas de bancada", "emendas de comissão",
+    "programação orçamentária e financeira",
+    "cronograma de execução mensal de desembolso",
+    "relatório resumido da execução orçamentária",
+    "ploa", "projeto de lei orçamentária",
+    "decreto", "medida provisória", "despacho do presidente", "mensagem n",
 ]
 
-# Filtro 2: Termos orçamentários gerais
-BUDGET_KEYWORDS = [
-    "crédito suplementar", "crédito extraordinário", "execução orçamentária",
-    "lei orçamentária", "orçamentos fiscal", "reforço de dotações",
-    "programação orçamentária e financeira", "altera grupos de natureza de despesa",
-    "limites de movimentação", "limites de pagamento", "fontes de recursos",
-    "movimentação e empenho", "classificação orçamentária"
-]
-
-# Filtro 2: Palavras que indicam um ato de amplo alcance
-BROAD_IMPACT_KEYWORDS = [
-    "diversos órgãos", "diversos orgaos", "vários órgãos", "varios orgaos", 
-    "diversos ministérios", "diversos ministerios"
-]
-
-
+# ====== MODELS ======
 class Publicacao(BaseModel):
     date: Optional[str] = None
     section: Optional[str] = None
@@ -64,76 +68,203 @@ class ProcessResponse(BaseModel):
     publications: List[Publicacao]
     whatsapp_text: str
 
+# ====== HELPERS ======
 _ws = re.compile(r"\s+")
 def norm(s: Optional[str]) -> str:
     if not s: return ""
     return _ws.sub(" ", s).strip()
 
-def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    lines = ["Bom dia!","","PTC as seguintes publicações de interesse:"]
-    try:
-        dt = datetime.fromisoformat(when)
-        dd = dt.strftime("%d%b").upper()
-    except Exception:
-        dd = when
-    lines += [f"DOU {dd}:","", "🔰 Seção 1",""]
-    if not pubs:
-        lines.append("— Sem ocorrências para os critérios informados —")
-        return "\n".join(lines)
-    for p in pubs:
-        lines.append(f"▶️ {p.organ or 'Órgão'}")
-        lines.append("")
-        lines.append(f"📌 {p.type or 'Ato/Portaria'}")
-        if p.summary: lines.append(p.summary)
-        lines.append("")
-        lines.append("⚓ Para conhecimento.")
-        lines.append("")
-    return "\n".join(lines)
+def _normalize(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower().strip()
 
-def parse_xml_bytes(xml_bytes: bytes, direct_keywords: List[str], budget_keywords: List[str], broad_impact_keywords: List[str]) -> List[Publicacao]:
+def contains_any(text: str, terms: List[str]) -> bool:
+    t = _normalize(text)
+    return any(_normalize(term) in t for term in terms)
+
+def is_budgetary(text: str) -> bool:
+    keys = [
+        "crédito suplementar", "crédito extraordinário",
+        "grupo de natureza de despesa", "gnd",
+        "modifica fontes", "fonte de recursos",
+        "programação orçamentária", "cronograma de execução",
+        "relatório resumido da execução orçamentária",
+        "ploa", "emendas",
+    ]
+    t = _normalize(text)
+    return any(_normalize(k) in t for k in keys)
+
+def contains_money(text: str) -> bool:
+    return bool(MONEY_RE.search(text or ""))
+
+def pretty_org(art_category: str) -> str:
+    parts = [p.strip() for p in (art_category or "").split("/") if p.strip()]
+    if not parts:
+        return "Órgão não identificado"
+    return " / ".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+def extract_title_and_lines(body_html: str) -> tuple[str, List[str]]:
+    if not body_html:
+        return ("Ato", [])
+    soup = BeautifulSoup(body_html, "html.parser")
+    ident = ""
+    ident_tag = soup.find(class_="identifica")
+    if ident_tag:
+        ident = ident_tag.get_text(" ", strip=True)
+    lines = []
+    for p in soup.find_all("p"):
+        txt = re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
+        if txt:
+            lines.append(txt)
+    lines = [ln for i, ln in enumerate(lines) if (ln and ln != ident and ln not in lines[:i])]
+    return (ident or "Ato", lines[:6])
+
+def impact_note(fulltext: str) -> str:
+    t = _normalize(fulltext)
+    if "crédito suplementar" in t:
+        return "Abre crédito suplementar — verificar UGs/ações da MB."
+    if "crédito extraordinário" in t:
+        return "Crédito extraordinário — avaliar reflexos para MD/MB."
+    if "grupo de natureza de despesa" in t or "gnd" in t:
+        return "Troca de GND — conferir ações/AOs da MB."
+    if "modifica fontes" in t or "fonte de recursos" in t:
+        return "Alteração de fonte — conferir impactos na MB."
+    if "relatório resumido da execução orçamentária" in t:
+        return "RREO — contexto fiscal; monitorar."
+    if "ploa" in t:
+        return "PLOA — prazos/procedimentos; monitorar MPO/SOF."
+    if "despacho do presidente" in t or "mensagem n" in t:
+        return "Ato presidencial — acompanhar tramitação/efeitos."
+    if "decreto" in t or "medida provisoria" in t or "medida provisória" in t:
+        return "Pode alterar regras/cronogramas; verificar reflexos."
+    return "MB para conhecimento."
+
+def score_snippet(organ: str, title: str, body_summary: str) -> int:
+    text = " ".join([organ or "", title or "", body_summary or ""])
+    score = 0
+    n = _normalize(text)
+    if "ministerio da defesa" in n or "comando da marinha" in n or "marinha do brasil" in n:
+        score += 40
+    if "amazul" in n or "amazonia azul tecnologias de defesa" in n:
+        score += 35
+    if "emgepron" in n or "empresa gerencial de projetos navais" in n:
+        score += 35
+    if "ministerio do planejamento e orcamento" in n or "secretaria de orcamento federal" in n:
+        score += 45
+    if "ministerio da fazenda" in n or "secretaria do tesouro nacional" in n:
+        score += 35
+    if "presidencia da republica" in n:
+        score += 25
+    if is_budgetary(text):
+        score += 25
+    if contains_money(text):
+        score += 15
+    if contains_any(text, INCLUDE_TERMS):
+        score += 20
+    return score
+
+# ====== PARSER ======
+def parse_xml_bytes(xml_bytes: bytes, keywords: Optional[List[str]] = None) -> List[Publicacao]:
     pubs: List[Publicacao] = []
-    try:
-        soup = BeautifulSoup(xml_bytes, 'lxml-xml')
-        articles = soup.find_all('Artigo')
+    soup_xml = BeautifulSoup(xml_bytes, "lxml-xml")
+    if not soup_xml or not soup_xml.find():
+        soup_xml = BeautifulSoup(xml_bytes, "html.parser")
 
-        for art in articles:
-            organ = norm(art.find('Orgao').get_text() if art.find('Orgao') else "")
-            act_type = norm(art.find('Identifica').get_text() if art.find('Identifica') else "")
-            summary = norm(art.find('Ementa').get_text() if art.find('Ementa') else "")
-            full_text = norm(art.get_text())
-            search_content = (organ + ' ' + act_type + ' ' + summary + ' ' + full_text).lower()
-            
-            is_relevant = False
+    for art in soup_xml.find_all("article"):
+        section = (art.get("pubName") or "").upper()
+        if section != DO1_NAME:
+            continue
 
-            # Filtro 1: Interesse Direto (Marinha, Defesa, etc.)
-            if any(kw.lower() in search_content for kw in direct_keywords):
-                is_relevant = True
+        art_category = art.get("artCategory") or ""
+        organ = pretty_org(art_category)
 
-            # Filtro 2: Atos Orçamentários de Amplo Impacto
-            if not is_relevant:
-                contains_budget_term = any(bkw.lower() in search_content for bkw in budget_keywords)
-                has_broad_impact = any(bikw.lower() in search_content for bikw in broad_impact_keywords)
-                
-                # É relevante se for um ato orçamentário E de amplo impacto
-                if contains_budget_term and has_broad_impact:
-                    is_relevant = True
-            
-            if is_relevant:
-                final_summary = summary if summary else (full_text[:500] + '...' if len(full_text) > 500 else full_text)
-                pub = Publicacao(
-                    organ=organ if organ else "Órgão não identificado",
-                    type=act_type if act_type else "Ato não identificado",
-                    summary=final_summary,
-                    raw=full_text
-                )
-                pubs.append(pub)
+        body_node = art.find("body")
+        body_html = ""
+        if body_node:
+            texto_tag = body_node.find("Texto")
+            if texto_tag:
+                body_html = texto_tag.decode_contents()
+            else:
+                body_html = body_node.decode_contents()
+        else:
+            body_html = art.decode_contents()
 
-    except Exception as e:
-        pubs.append(Publicacao(type="Erro de Parsing", summary=f"Falha ao processar XML: {str(e)}", raw=xml_bytes.decode("utf-8", errors="ignore")[:1000]))
+        title, lines = extract_title_and_lines(body_html)
+        core = []
+        for ln in lines:
+            if ln and ln != title:
+                core.append(ln)
+            if len(core) >= 2:
+                break
+        summary_txt = " ".join(core) if core else ""
+        pdf_page = art.get("pdfPage") or ""
+        fulltext = " ".join([art_category, title, summary_txt, body_html])
 
+        kw_list = keywords if keywords else INCLUDE_TERMS
+        passes = contains_any(fulltext, kw_list) or is_budgetary(fulltext)
+        if not passes:
+            passes = any(x in _normalize(fulltext) for x in [
+                "ministerio da defesa", "comando da marinha", "marinha do brasil", "amazul", "emgepron"
+            ])
+        if not passes:
+            continue
+
+        _type = title
+        _summary = summary_txt
+        if pdf_page:
+            _summary = (_summary + f" 🔗 Página: {pdf_page}").strip()
+
+        pubs.append(Publicacao(
+            date=art.get("pubDate"),
+            section=section,
+            organ=organ,
+            type=_type,
+            summary=_summary,
+            raw=body_html[:5000]
+        ))
     return pubs
 
-# O restante do código (funções de login, download, etc.) permanece o mesmo
+# ====== WHATSAPP FORMATTER ======
+def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
+    if not pubs:
+        return f"Bom dia!\n\nPTC as seguintes publicações de interesse:\nDOU (Seção 1)\n\n— Sem itens relevantes em {when}."
+
+    scored = []
+    for p in pubs:
+        organ = p.organ or "Órgão não identificado"
+        title = p.type or "Ato"
+        summary = p.summary or ""
+        s = score_snippet(organ, title, summary)
+        scored.append((s, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    groups = defaultdict(list)
+    for s, p in scored:
+        organ = p.organ or "Órgão não identificado"
+        title = p.type or "Ato"
+        summary = p.summary or ""
+        note = impact_note(" ".join([organ, title, summary]))
+        icon = "✔️" if s >= 60 else "▶️"
+        line = f"{icon} {title}\n{summary}\n⚓ {note}"
+        groups[organ].append(line)
+
+    parts = [
+        "Bom dia!",
+        "",
+        "PTC as seguintes publicações de interesse:",
+        "DOU (Seção 1)",
+        ""
+    ]
+    for organ, lines in groups.items():
+        parts.append(f"🔰 {organ}")
+        parts.extend(lines)
+        parts.append("")
+    return "\n".join(parts).strip()
+
+# ====== INLABS CLIENT ======
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS:
         raise HTTPException(status_code=500, detail="Config ausente: defina INLABS_USER e INLABS_PASS.")
@@ -153,17 +284,24 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     r = await client.get(INLABS_BASE)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+    anchors = soup.find_all("a")
     cand_texts = [date, date.replace("-", "_"), date.replace("-", "")]
-    for a in soup.find_all("a"):
+    for a in anchors:
         href = (a.get("href") or "").strip()
         txt = (a.get_text() or "").strip()
         hay = (txt + " " + href).lower()
         if any(c.lower() in hay for c in cand_texts):
             return urljoin(INLABS_BASE.rstrip("/") + "/", href.lstrip("/"))
-    fallback_url = f"{INLABS_BASE.rstrip('/')}/{date}/"
-    rr = await client.get(fallback_url)
-    if rr.status_code == 200:
-        return fallback_url
+    candidates = [
+        f"{INLABS_BASE.rstrip('/')}/{date}",
+        f"{INLABS_BASE.rstrip('/')}/{date}/",
+        f"{INLABS_BASE.rstrip('/')}/{date.replace('-', '_')}",
+        f"{INLABS_BASE.rstrip('/')}/{date.replace('-', '_')}/",
+    ]
+    for u in candidates:
+        rr = await client.get(u)
+        if rr.status_code == 200 and (".zip" in rr.text.lower() or "<a" in rr.text.lower()):
+            return u
     raise HTTPException(status_code=404, detail=f"Não encontrei a pasta/listagem da data {date} após o login.")
 
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
@@ -175,13 +313,23 @@ async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
 
 def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
     soup = BeautifulSoup(html, "html.parser")
+    anchors = soup.find_all("a")
     links: List[str] = []
     wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.lower().endswith(".zip") and any(sec in (a.get_text() or href).upper() for sec in wanted):
+    for a in anchors:
+        href = a.get("href") or ""
+        label = (a.get_text() or href).upper()
+        if not href.lower().endswith(".zip"):
+            continue
+        if any(sec in label for sec in wanted) or "DO" in label:
             links.append(urljoin(base_url_for_rel.rstrip("/") + "/", href))
-    return sorted(list(set(links)))
+    seen = set()
+    uniq = []
+    for u in links:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
 
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
     r = await client.get(url)
@@ -197,27 +345,15 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
                 xml_blobs.append(z.read(name))
     return xml_blobs
 
+# ====== ENDPOINT ======
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
     data: str = Form(..., description="YYYY-MM-DD"),
     sections: Optional[str] = Form("DO1", description="Ex.: 'DO1' ou 'DO1,DO2,DO3'"),
     keywords_json: Optional[str] = Form(None)
 ):
-    # Lógica de keywords customizadas é mantida, mas a principal usará os filtros inteligentes
-    if keywords_json:
-        try:
-            custom_keywords = json.loads(keywords_json)
-            direct_keywords = custom_keywords
-            budget_keywords = []  # Desativa outros filtros se customizar
-            broad_impact_keywords = []
-        except:
-            raise HTTPException(status_code=400, detail="Formato de keywords_json inválido.")
-    else:
-        direct_keywords = KEYWORDS_DIRECT_INTEREST
-        budget_keywords = BUDGET_KEYWORDS
-        broad_impact_keywords = BROAD_IMPACT_KEYWORDS
-
-    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
+    keywords = INCLUDE_TERMS if not keywords_json else json.loads(keywords_json)
+    secs = ["DO1"]  # força DO1
 
     client = await inlabs_login_and_get_session()
     try:
@@ -225,23 +361,21 @@ async def processar_inlabs(
         html = await fetch_listing_html(client, data)
         zip_links = pick_zip_links_from_listing(html, listing_url, secs)
         if not zip_links:
-            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
-        
+            raise HTTPException(status_code=404, detail="Não encontrei ZIPs da data informada.")
         pubs: List[Publicacao] = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
             for blob in extract_xml_from_zip(zb):
-                pubs.extend(parse_xml_bytes(blob, direct_keywords, budget_keywords, broad_impact_keywords))
-        
+                pubs.extend(parse_xml_bytes(blob, keywords))
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            key = (p.type or "") + "||" + (p.summary or "")[:200]
             if key not in seen:
                 seen.add(key)
                 merged.append(p)
-        
         texto = monta_whatsapp(merged, data)
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
+
