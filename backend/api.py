@@ -28,7 +28,6 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== FRASES PADRÃO PARA ANOTAÇÃO ======
 ANNOTATION_POSITIVE = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
-# NOVA ANOTAÇÃO PRAGMÁTICA
 ANNOTATION_MPO_BUDGET = "Ato orçamentário do MPO. Recomenda-se análise manual dos anexos para verificar o impacto na MB/MD."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
@@ -72,8 +71,12 @@ def norm(s: Optional[str]) -> str:
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     lines = ["Bom dia!","","PTC as seguintes publicações de interesse:"]
-    try: dt = datetime.fromisoformat(when); dd = dt.strftime("%d%b").upper()
-    except Exception: dd = when
+    try:
+        dt = datetime.fromisoformat(when)
+        meses = ["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"]
+        dd = f"{dt.day:02d}{meses[dt.month-1]}"
+    except Exception:
+        dd = when
     lines += [f"DOU {dd}:","", "🔰 Seção 1",""]
     if not pubs:
         lines.append("— Sem ocorrências para os critérios informados —")
@@ -105,10 +108,14 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             if not act_type: continue
 
             summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
-            
             search_content = norm(art.get_text(strip=True)).lower()
-            
             display_text = norm(body.get_text(strip=True))
+
+            # --- BLOQUEIO DE DUPLICATA DO MPO ---
+            organ_l = (organ or "").lower()
+            if "ministério do planejamento e orçamento" in organ_l and "gabinete da ministra" in organ_l:
+                continue
+
             if not summary:
                 match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
                 if match: summary = norm(match.group(1))
@@ -116,30 +123,25 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             is_relevant = False
             reason = None
 
-            # Filtro 1: Interesse Direto
             if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
                 is_relevant = True
                 reason = ANNOTATION_POSITIVE
-            
-            # Filtros 2 e 3 para atos orçamentários
             elif any(bkw in search_content for bkw in BUDGET_KEYWORDS):
                 is_broad = any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS)
                 is_mpo = MPO_ORG_STRING in organ.lower()
-
                 if is_broad or is_mpo:
                     is_relevant = True
                     reason = ANNOTATION_MPO_BUDGET
             
             if is_relevant:
                 final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
-                pub = Publicacao(
+                pubs.append(Publicacao(
                     organ=organ if organ else "Órgão não identificado",
                     type=act_type if act_type else "Ato não identificado",
                     summary=final_summary,
                     raw=display_text,
                     relevance_reason=reason
-                )
-                pubs.append(pub)
+                ))
 
     except Exception as e:
         pubs.append(Publicacao(type="Erro de Parsing", summary=f"Falha ao processar XML: {str(e)}", raw=xml_bytes.decode("utf-8", errors="ignore")[:1000]))
@@ -147,7 +149,6 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
 
 
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
-    # ... (código inalterado)
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
     try: await client.get(INLABS_BASE)
@@ -157,8 +158,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     return client
 
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
-    # ... (código inalterado)
-    r = await client.get(INLABS_BASE); r.raise_for_status(); soup = BeautifulSoup(r.text, "html.parser"); cand_texts = [date, date.replace("-", "_"), date.replace("-", "")];
+    r = await client.get(INLABS_BASE); r.raise_for_status(); soup = BeautifulSoup(r.text, "html.parser"); cand_texts = [date, date.replace("-", "_"), date.replace("-", "")]
     for a in soup.find_all("a"):
         href = (a.get("href") or "").strip(); txt = (a.get_text() or "").strip(); hay = (txt + " " + href).lower()
         if any(c.lower() in hay for c in cand_texts): return urljoin(INLABS_BASE.rstrip("/") + "/", href.lstrip("/"))
@@ -167,13 +167,11 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     raise HTTPException(status_code=404, detail=f"Não encontrei a pasta/listagem da data {date} após o login.")
 
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
-    # ... (código inalterado)
     url = await resolve_date_url(client, date); r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao abrir listagem {url}: HTTP {r.status_code}")
     return r.text
 
 def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
-    # ... (código inalterado)
     soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -181,13 +179,11 @@ def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections:
     return sorted(list(set(links)))
 
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
-    # ... (código inalterado)
     r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao baixar ZIP {url}: HTTP {r.status_code}")
     return r.content
 
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
-    # ... (código inalterado)
     xml_blobs: List[bytes] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
@@ -195,12 +191,7 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
                 xml_blobs.append(z.read(name))
     return xml_blobs
 
-# >>>>>>>>>> NOVO HELPER: usa o parser MPO/MB diretamente no ZIP baixado <<<<<<<<<<
 def _parse_mpo_mb_from_zipbytes(zip_bytes: bytes):
-    """
-    Salva o ZIP em /tmp e executa o parser MPO/MB.
-    Retorna: (whatsapp_txt, payload_json)
-    """
     tmp = "/tmp/dou_inlabs.zip"
     with open(tmp, "wb") as f:
         f.write(zip_bytes)
@@ -226,27 +217,19 @@ async def processar_inlabs(
             raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
         
         pubs: List[Publicacao] = []
-        mpo_whatsapps: List[str] = []   # textos do parser MPO/MB
-        # mpo_payloads: List[dict] = [] # opcional para debug/inspeção
+        mpo_whatsapps: List[str] = []
 
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
-
-            # 1) Parser MPO/MB (TOTAL-GERAL por UG da MB)
             try:
                 mpo_txt, _payload = _parse_mpo_mb_from_zipbytes(zb)
                 if mpo_txt and mpo_txt.strip():
                     mpo_whatsapps.append(mpo_txt.strip())
-                # mpo_payloads.append(_payload)  # se desejar guardar detalhes
             except Exception:
-                # se o parser falhar, seguimos com pipeline original sem travar
                 pass
-
-            # 2) Pipeline original (demais publicações relevantes por heurística)
             for blob in extract_xml_from_zip(zb):
                 pubs.extend(parse_xml_bytes(blob))
         
-        # merge anti-duplicação
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -256,12 +239,9 @@ async def processar_inlabs(
                 merged.append(p)
         
         texto = monta_whatsapp(merged, data)
-
-        # >>>>>>>>>> INSERÇÃO: antepor blocos MPO/MB ao texto padrão <<<<<<<<<<
         if mpo_whatsapps:
             texto = "\n\n".join([x for x in mpo_whatsapps if x.strip()]) + "\n\n" + texto
 
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
-
