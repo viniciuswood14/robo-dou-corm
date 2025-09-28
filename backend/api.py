@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 9.0 - LÓGICA MPO ESPECÍFICA ##########
+# ########## VERSÃO 9.1 - CORREÇÃO DE ERRO E DEDUP ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v9.0 Lógica MPO")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v9.1 Corrigido")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -27,7 +27,6 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
-# MUDANÇA: Tags específicas para busca dentro das portarias do MPO
 MPO_NAVY_TAGS = {
     "52131": "Comando da Marinha",
     "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
@@ -98,6 +97,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
 
 
 def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
+    # ... (lógica interna desta função inalterada)
     organ = norm(main_article.get('artCategory', ''))
     body = main_article.find('body')
     if not body: return None
@@ -119,7 +119,6 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
     is_mpo = MPO_ORG_STRING in organ.lower()
 
     if is_mpo:
-        # Lógica específica para o MPO
         found_tags_in_mpo = []
         for code, name in MPO_NAVY_TAGS.items():
             if code in search_content:
@@ -133,7 +132,6 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
             reason = ANNOTATION_NEGATIVE
             
     else:
-        # Lógica para os demais órgãos
         for kw in KEYWORDS_DIRECT_INTEREST:
             if kw in search_content:
                 is_relevant = True
@@ -241,7 +239,19 @@ async def processar_inlabs(
                 if publication:
                     pubs.append(publication)
         
-        texto = monta_whatsapp(pubs, data)
-        return ProcessResponse(date=data, count=len(pubs), publications=merged, whatsapp_text=texto)
+        # MUDANÇA: Bloco de deduplicação reintroduzido e corrigido
+        seen: Set[str] = set()
+        merged: List[Publicacao] = []
+        for p in pubs:
+            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            if key not in seen:
+                seen.add(key)
+                merged.append(p)
+        
+        texto = monta_whatsapp(merged, data)
+        # MUDANÇA: A variável na linha de retorno foi corrigida de 'merged' para 'merged' (ops, de 'pubs' para 'merged')
+        # A correção real é usar a variável correta na linha de retorno. Na v9.0 o erro era usar 'merged' que não existia.
+        # Agora estamos usando 'merged' que acabamos de criar.
+        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
