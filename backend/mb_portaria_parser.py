@@ -36,34 +36,45 @@ def _html_to_text(html: str) -> str:
 
 
 def _extract_header_hint(text: str) -> str:
-    # Frase mais comum
-    m = re.search(r"(Abre\s+ao?s?\s+Or(ç|c)amentos?[^.]+?\.)", text, flags=re.I)
+    if not text:
+        return ""
+
+    # 1) Padrões mais comuns e "fechados" (MPO)
+    m = re.search(
+        r"(Abre\s+ao?s?\s+Or(ç|c)amentos?[\s\S]*?vigente\.)",
+        text, flags=re.I
+    )
     if m:
-        return m.group(1).strip()
+        return re.sub(r"\s+", " ", m.group(1)).strip()
 
-    # Outras aberturas típicas
-    patterns = [
-        r"(Adequa[^.]+?\.)",
-        r"(Altera[^.]+?\.)",
-        r"(Autoriza[^.]+?\.)",
-        r"(Disp(õ|o)e[^.]+?\.)",
-        r"(Estabelece[^.]+?\.)",
-        r"(Fixa[^.]+?\.)",
-        r"(Prorroga[^.]+?\.)",
-    ]
-    for p in patterns:
-        m = re.search(p, text, flags=re.I)
+    m = re.search(
+        r"(Adequa[\s\S]*?alterações\s+posteriores\.)",
+        text, flags=re.I
+    )
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    # 2) Outras aberturas comuns (genéricas), mas mantendo frase longa
+    for pat in [
+        r"(Altera[\s\S]*?\.)",
+        r"(Autoriza[\s\S]*?\.)",
+        r"(Disp(õ|o)e[\s\S]*?\.)",
+        r"(Estabelece[\s\S]*?\.)",
+        r"(Fixa[\s\S]*?\.)",
+        r"(Prorroga[\s\S]*?\.)",
+    ]:
+        m = re.search(pat, text, flags=re.I)
         if m:
-            return m.group(1).strip()
+            return re.sub(r"\s+", " ", m.group(1)).strip()
 
-    # Fallback: primeira sentença longa antes de "ANEXO I"
+    # 3) Fallback: pegar a primeira sentença longa antes de "ANEXO I"
     pre = re.split(r"ANEXO\s+I", text, flags=re.I)[0]
     sentences = re.split(r"(?<=\.)\s+", pre)
     for s in sentences:
-        if len(s) > 80 and any(v in s.lower() for v in ["orçament", "lme", "limites", "crédito"]):
-            return s.strip()
+        s_norm = re.sub(r"\s+", " ", s).strip()
+        if len(s_norm) > 80 and any(x in s_norm.lower() for x in ["orçament", "lme", "limites", "crédito"]):
+            return s_norm
     return pre.strip()[:220].rstrip(" ,;")
-
 
 def _port_id_from_text(text: str, name_attr: str) -> str:
     # Ex.: "PORTARIA GM/MPO Nº 330, DE ... 2025"
