@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 8.0 - CONTEXTUAL (DEFINITIVA) ##########
+# ########## VERSÃO 9.0 - LÓGICA MPO ESPECÍFICA ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v8.0 Contextual")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v9.0 Lógica MPO")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -24,10 +24,20 @@ INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== FRASES PADRÃO PARA ANOTAÇÃO ======
-ANNOTATION_POSITIVE = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
 ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
+# MUDANÇA: Tags específicas para busca dentro das portarias do MPO
+MPO_NAVY_TAGS = {
+    "52131": "Comando da Marinha",
+    "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
+    "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
+    "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
+    "52931": "Fundo Naval",
+    "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
+    "52000": "Ministério da Defesa",
+}
+
 KEYWORDS_DIRECT_INTEREST = [
     "ministério da defesa", "força armanda", "forças armandas", "militar", "militares",
     "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
@@ -88,13 +98,12 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
 
 
 def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
-    # Extrai metadados do artigo principal
     organ = norm(main_article.get('artCategory', ''))
     body = main_article.find('body')
     if not body: return None
 
     act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
-    if not act_type: return None # Garante que é um artigo principal
+    if not act_type: return None
 
     summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
     display_text = norm(body.get_text(strip=True))
@@ -102,29 +111,35 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
         match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
         if match: summary = norm(match.group(1))
 
-    # Realiza a busca no conteúdo completo da matéria (principal + anexos)
     search_content = norm(full_text_content).lower()
-
+    
     is_relevant = False
     reason = None
-
-    # Filtro 1: Interesse Direto
-    if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
-        is_relevant = True
-        reason = ANNOTATION_POSITIVE
     
-    # Filtro 2: Atos Orçamentários de Amplo Impacto
-    elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
-         any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
-        is_relevant = True
-        reason = ANNOTATION_NEGATIVE
+    is_mpo = MPO_ORG_STRING in organ.lower()
 
-    # Filtro 3: Qualquer ato orçamentário do MPO
-    elif MPO_ORG_STRING in organ.lower() and \
-         any(bkw in search_content for bkw in BUDGET_KEYWORDS):
-        is_relevant = True
-        reason = ANNOTATION_NEGATIVE
-
+    if is_mpo:
+        # Lógica específica para o MPO
+        found_tags_in_mpo = []
+        for code, name in MPO_NAVY_TAGS.items():
+            if code in search_content:
+                found_tags_in_mpo.append(name)
+        
+        if found_tags_in_mpo:
+            is_relevant = True
+            reason = f"Há menção específica ou impacto direto identificado para {', '.join(found_tags_in_mpo)} nas partes da publicação analisadas."
+        elif any(bkw in search_content for bkw in BUDGET_KEYWORDS):
+            is_relevant = True
+            reason = ANNOTATION_NEGATIVE
+            
+    else:
+        # Lógica para os demais órgãos
+        for kw in KEYWORDS_DIRECT_INTEREST:
+            if kw in search_content:
+                is_relevant = True
+                reason = f"Há menção específica à TAG: '{kw}'."
+                break
+    
     if is_relevant:
         final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
         return Publicacao(
@@ -202,30 +217,23 @@ async def processar_inlabs(
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
 
-        # ETAPA 1: Agrupar todos os XML por idMateria
         materias: Dict[str, Dict] = {}
         for blob in all_xml_blobs:
             try:
                 soup = BeautifulSoup(blob, 'lxml-xml')
                 article = soup.find('article')
                 if not article: continue
-
                 materia_id = article.get('idMateria')
                 if not materia_id: continue
-
                 if materia_id not in materias:
                     materias[materia_id] = {'main_article': None, 'full_text': ''}
-                
                 materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
-                
-                # O artigo "principal" é aquele que tem uma tag <Identifica> com conteúdo
                 body = article.find('body')
                 if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
                     materias[materia_id]['main_article'] = article
             except Exception:
                 continue
         
-        # ETAPA 2: Processar cada matéria agrupada
         pubs: List[Publicacao] = []
         for materia_id, content in materias.items():
             if content['main_article']:
@@ -234,7 +242,7 @@ async def processar_inlabs(
                     pubs.append(publication)
         
         texto = monta_whatsapp(pubs, data)
-        return ProcessResponse(date=data, count=len(pubs), publications=pubs, whatsapp_text=texto)
+        return ProcessResponse(date=data, count=len(pubs), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
 
