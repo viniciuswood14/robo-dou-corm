@@ -222,3 +222,23 @@ async def processar_inlabs(
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
+
+# === MPO (MB) — Endpoint para parser TOTAL-GERAL por UG ===
+from fastapi import UploadFile, File
+from mb_portaria_parser import parse_zip_and_render, MB_UGS_DEFAULT
+
+@app.post("/dou/mpo/mb/parse")
+async def parse_mpo_mb(zip_file: UploadFile = File(...)):
+    """
+    Recebe um .zip com os XMLs do DOU e retorna:
+      - 'whatsapp': texto consolidado por Portaria (MPO) para UGs da MB
+      - 'portarias': JSON estruturado com totais e linhas por UG
+    """
+    data = await zip_file.read()
+    tmp = "/tmp/dou_upload.zip"
+    with open(tmp, "wb") as f:
+        f.write(data)
+
+    whatsapp_txt, payload = parse_zip_and_render(tmp, mb_ugs=MB_UGS_DEFAULT)
+    return {"ok": True, "whatsapp": whatsapp_txt, "portarias": payload}
+
