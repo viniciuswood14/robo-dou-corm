@@ -245,4 +245,3 @@ async def processar_inlabs(
         return ProcessResponse(date=data, count=len(pubs), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
-
