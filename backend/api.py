@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 from datetime import datetime
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 7.0 - ABORDAGEM PRAGMÁTICA FINAL ##########
+# ########## VERSÃO 8.0 - CONTEXTUAL (DEFINITIVA) ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v7.0 Pragmática")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v8.0 Contextual")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -25,8 +25,7 @@ INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== FRASES PADRÃO PARA ANOTAÇÃO ======
 ANNOTATION_POSITIVE = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
-# NOVA ANOTAÇÃO PRAGMÁTICA
-ANNOTATION_MPO_BUDGET = "Ato orçamentário do MPO. Recomenda-se análise manual dos anexos para verificar o impacto na MB/MD."
+ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
 
 # ====== LISTAS DE PALAVRAS-CHAVE PARA FILTROS INTELIGENTES ======
 KEYWORDS_DIRECT_INTEREST = [
@@ -68,6 +67,7 @@ def norm(s: Optional[str]) -> str:
     return _ws.sub(" ", s).strip()
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
+    # ... (código inalterado)
     lines = ["Bom dia!","","PTC as seguintes publicações de interesse:"]
     try: dt = datetime.fromisoformat(when); dd = dt.strftime("%d%b").upper()
     except Exception: dd = when
@@ -87,61 +87,54 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     return "\n".join(lines)
 
 
-def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
-    pubs: List[Publicacao] = []
-    try:
-        soup = BeautifulSoup(xml_bytes, 'lxml-xml')
-        articles = soup.find_all('article')
+def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
+    # Extrai metadados do artigo principal
+    organ = norm(main_article.get('artCategory', ''))
+    body = main_article.find('body')
+    if not body: return None
 
-        for art in articles:
-            organ = norm(art.get('artCategory', ''))
-            body = art.find('body')
-            if not body: continue
+    act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
+    if not act_type: return None # Garante que é um artigo principal
 
-            act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
-            if not act_type: continue
+    summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
+    display_text = norm(body.get_text(strip=True))
+    if not summary:
+        match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
+        if match: summary = norm(match.group(1))
 
-            summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
-            
-            search_content = norm(art.get_text(strip=True)).lower()
-            
-            display_text = norm(body.get_text(strip=True))
-            if not summary:
-                match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
-                if match: summary = norm(match.group(1))
+    # Realiza a busca no conteúdo completo da matéria (principal + anexos)
+    search_content = norm(full_text_content).lower()
 
-            is_relevant = False
-            reason = None
+    is_relevant = False
+    reason = None
 
-            # Filtro 1: Interesse Direto
-            if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
-                is_relevant = True
-                reason = ANNOTATION_POSITIVE
-            
-            # Filtros 2 e 3 para atos orçamentários
-            elif any(bkw in search_content for bkw in BUDGET_KEYWORDS):
-                is_broad = any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS)
-                is_mpo = MPO_ORG_STRING in organ.lower()
+    # Filtro 1: Interesse Direto
+    if any(kw in search_content for kw in KEYWORDS_DIRECT_INTEREST):
+        is_relevant = True
+        reason = ANNOTATION_POSITIVE
+    
+    # Filtro 2: Atos Orçamentários de Amplo Impacto
+    elif any(bkw in search_content for bkw in BUDGET_KEYWORDS) and \
+         any(bikw in search_content for bikw in BROAD_IMPACT_KEYWORDS):
+        is_relevant = True
+        reason = ANNOTATION_NEGATIVE
 
-                if is_broad or is_mpo:
-                    is_relevant = True
-                    reason = ANNOTATION_MPO_BUDGET
-            
-            if is_relevant:
-                final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
-                pub = Publicacao(
-                    organ=organ if organ else "Órgão não identificado",
-                    type=act_type if act_type else "Ato não identificado",
-                    summary=final_summary,
-                    raw=display_text,
-                    relevance_reason=reason
-                )
-                pubs.append(pub)
+    # Filtro 3: Qualquer ato orçamentário do MPO
+    elif MPO_ORG_STRING in organ.lower() and \
+         any(bkw in search_content for bkw in BUDGET_KEYWORDS):
+        is_relevant = True
+        reason = ANNOTATION_NEGATIVE
 
-    except Exception as e:
-        pubs.append(Publicacao(type="Erro de Parsing", summary=f"Falha ao processar XML: {str(e)}", raw=xml_bytes.decode("utf-8", errors="ignore")[:1000]))
-    return pubs
-
+    if is_relevant:
+        final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
+        return Publicacao(
+            organ=organ,
+            type=act_type,
+            summary=final_summary,
+            raw=display_text,
+            relevance_reason=reason
+        )
+    return None
 
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     # ... (código inalterado)
@@ -194,7 +187,7 @@ async def processar_inlabs(
 ):
     secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
     if keywords_json:
-        raise HTTPException(status_code=400, detail="Customização de keywords desativada em favor da lógica inteligente. Deixe o campo avançado em branco.")
+        raise HTTPException(status_code=400, detail="Customização de keywords desativada em favor da lógica inteligente.")
     
     client = await inlabs_login_and_get_session()
     try:
@@ -202,24 +195,46 @@ async def processar_inlabs(
         html = await fetch_listing_html(client, data)
         zip_links = pick_zip_links_from_listing(html, listing_url, secs)
         if not zip_links:
-            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
+            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
         
-        pubs: List[Publicacao] = []
+        all_xml_blobs = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
-            for blob in extract_xml_from_zip(zb):
-                pubs.extend(parse_xml_bytes(blob))
+            all_xml_blobs.extend(extract_xml_from_zip(zb))
+
+        # ETAPA 1: Agrupar todos os XML por idMateria
+        materias: Dict[str, Dict] = {}
+        for blob in all_xml_blobs:
+            try:
+                soup = BeautifulSoup(blob, 'lxml-xml')
+                article = soup.find('article')
+                if not article: continue
+
+                materia_id = article.get('idMateria')
+                if not materia_id: continue
+
+                if materia_id not in materias:
+                    materias[materia_id] = {'main_article': None, 'full_text': ''}
+                
+                materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
+                
+                # O artigo "principal" é aquele que tem uma tag <Identifica> com conteúdo
+                body = article.find('body')
+                if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
+                    materias[materia_id]['main_article'] = article
+            except Exception:
+                continue
         
-        seen: Set[str] = set()
-        merged: List[Publicacao] = []
-        for p in pubs:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
-            if key not in seen:
-                seen.add(key)
-                merged.append(p)
+        # ETAPA 2: Processar cada matéria agrupada
+        pubs: List[Publicacao] = []
+        for materia_id, content in materias.items():
+            if content['main_article']:
+                publication = process_grouped_materia(content['main_article'], content['full_text'])
+                if publication:
+                    pubs.append(publication)
         
-        texto = monta_whatsapp(merged, data)
-        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
+        texto = monta_whatsapp(pubs, data)
+        return ProcessResponse(date=data, count=len(pubs), publications=pubs, whatsapp_text=texto)
     finally:
         await client.aclose()
 
