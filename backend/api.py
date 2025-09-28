@@ -39,10 +39,10 @@ MPO_NAVY_TAGS = {
 
 KEYWORDS_DIRECT_INTEREST = [
     "ministério da defesa", "força armanda", "forças armandas",
-    "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
+    "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
     "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
-    "programa nuclear brasileiro"
+    "programa nuclear brasileiro", "programa nuclear da marinha", "fragata", "PFCT", "navio-patrulha", "navios-patrulhas", "PROSUB", "construçáo naval", "BR do Mar", "Fundo da Marinha Mercante", "Ensino Profissional Marítimo", "Adicional ao Frete para Renovação da Marinha Mercante", "FDEPM", "AMAZUL", "EMGEPRON"
 ]
 BUDGET_KEYWORDS = [
     "crédito suplementar", "crédito extraordinário", "execução orçamentária",
