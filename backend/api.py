@@ -111,10 +111,18 @@ def parse_xml_bytes(xml_bytes: bytes) -> List[Publicacao]:
             search_content = norm(art.get_text(strip=True)).lower()
             display_text = norm(body.get_text(strip=True))
 
-            # --- BLOQUEIO DE DUPLICATA DO MPO ---
-            organ_l = (organ or "").lower()
-            if "ministério do planejamento e orçamento" in organ_l and "gabinete da ministra" in organ_l:
-                continue
+            # >>> BLOQUEIO FINO: só suprime MPO que o parser dedicado já cobre (ANEXO + MD/UG MB) <<<
+organ_l = (organ or "").lower()
+if "ministério do planejamento e orçamento" in organ_l and "gabinete da ministra" in organ_l:
+    raw_l = display_text.lower()
+    # UGs da MB + MD
+    mb_ugs = ("52131","52133","52232","52233","52931","52932")
+    mentions_mb_ug = any(ug in raw_l for ug in mb_ugs)
+    mentions_md_orgao = ("órgão: 52000" in raw_l) or ("orgão: 52000" in raw_l)
+    has_anexo = "anexo" in raw_l
+    # Só pula quando for portaria MPO com ANEXO e referência ao MD/UGs MB
+    if has_anexo and (mentions_mb_ug or mentions_md_orgao):
+        continue
 
             if not summary:
                 match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
