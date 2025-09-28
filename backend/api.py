@@ -38,7 +38,7 @@ MPO_NAVY_TAGS = {
 }
 
 KEYWORDS_DIRECT_INTEREST = [
-    "ministério da defesa", "força armanda", "forças armandas", "militar", "militares",
+    "ministério da defesa", "força armanda", "forças armandas",
     "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
     "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
