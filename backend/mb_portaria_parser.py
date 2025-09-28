@@ -234,7 +234,6 @@ def render_whatsapp(agg: Dict[str, List[Dict]], pid_to_hint: Dict[str, str]) -> 
         canc = [r for r in rows if r["kind"] == "CANCELAMENTO"]
 
         wa = []
-        wa.append("🔰 Seção 1:\n")
         wa.append("▶️Ministério do Planejamento e Orçamento/Gabinete da Ministra\n")
         wa.append(f"📌PORTARIA GM/MPO Nº {pid}\n")
         wa.append(f"{pid_to_hint.get(pid, 'Ato orçamentário do MPO.')}\n")
@@ -262,8 +261,7 @@ def render_whatsapp(agg: Dict[str, List[Dict]], pid_to_hint: Dict[str, str]) -> 
 
         net = sum(r["valor"] for r in sup) - sum(r["valor"] for r in canc)
         wa.append(f"\n(Suplementação – Cancelamento) = {_brl(net)}\n")
-        wa.append("📁Portaria em anexo.\n")
-
+      
         blocks.append("\n".join(wa))
 
     return "\n\n".join(blocks)
