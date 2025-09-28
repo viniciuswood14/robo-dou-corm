@@ -9,6 +9,9 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
+# >>>>>>>>>> NOVO IMPORT (parser MPO/MB) <<<<<<<<<<
+from mb_portaria_parser import parse_zip_and_render, MB_UGS_DEFAULT
+
 # #############################################################
 # ########## VERSÃO 7.0 - ABORDAGEM PRAGMÁTICA FINAL ##########
 # #############################################################
@@ -152,6 +155,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     r = await client.post(INLABS_LOGIN_URL, data={"email": INLABS_USER, "password": INLABS_PASS})
     if r.status_code >= 400: await client.aclose(); raise HTTPException(status_code=502, detail=f"Falha de login no INLABS: HTTP {r.status_code}")
     return client
+
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     # ... (código inalterado)
     r = await client.get(INLABS_BASE); r.raise_for_status(); soup = BeautifulSoup(r.text, "html.parser"); cand_texts = [date, date.replace("-", "_"), date.replace("-", "")];
@@ -161,11 +165,13 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     fallback_url = f"{INLABS_BASE.rstrip('/')}/{date}/"; rr = await client.get(fallback_url)
     if rr.status_code == 200: return fallback_url
     raise HTTPException(status_code=404, detail=f"Não encontrei a pasta/listagem da data {date} após o login.")
+
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
     # ... (código inalterado)
     url = await resolve_date_url(client, date); r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao abrir listagem {url}: HTTP {r.status_code}")
     return r.text
+
 def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
     # ... (código inalterado)
     soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
@@ -173,18 +179,33 @@ def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections:
         href = a["href"]
         if href.lower().endswith(".zip") and any(sec in (a.get_text() or href).upper() for sec in wanted): links.append(urljoin(base_url_for_rel.rstrip("/") + "/", href))
     return sorted(list(set(links)))
+
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
     # ... (código inalterado)
     r = await client.get(url)
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao baixar ZIP {url}: HTTP {r.status_code}")
     return r.content
+
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     # ... (código inalterado)
-    xml_blobs: List[bytes] = [];
+    xml_blobs: List[bytes] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
-            if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
+            if name.lower().endswith(".xml"):
+                xml_blobs.append(z.read(name))
     return xml_blobs
+
+# >>>>>>>>>> NOVO HELPER: usa o parser MPO/MB diretamente no ZIP baixado <<<<<<<<<<
+def _parse_mpo_mb_from_zipbytes(zip_bytes: bytes):
+    """
+    Salva o ZIP em /tmp e executa o parser MPO/MB.
+    Retorna: (whatsapp_txt, payload_json)
+    """
+    tmp = "/tmp/dou_inlabs.zip"
+    with open(tmp, "wb") as f:
+        f.write(zip_bytes)
+    whatsapp_txt, payload = parse_zip_and_render(tmp, mb_ugs=MB_UGS_DEFAULT)
+    return whatsapp_txt, payload
 
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
@@ -205,11 +226,27 @@ async def processar_inlabs(
             raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}' na data informada.")
         
         pubs: List[Publicacao] = []
+        mpo_whatsapps: List[str] = []   # textos do parser MPO/MB
+        # mpo_payloads: List[dict] = [] # opcional para debug/inspeção
+
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
+
+            # 1) Parser MPO/MB (TOTAL-GERAL por UG da MB)
+            try:
+                mpo_txt, _payload = _parse_mpo_mb_from_zipbytes(zb)
+                if mpo_txt and mpo_txt.strip():
+                    mpo_whatsapps.append(mpo_txt.strip())
+                # mpo_payloads.append(_payload)  # se desejar guardar detalhes
+            except Exception:
+                # se o parser falhar, seguimos com pipeline original sem travar
+                pass
+
+            # 2) Pipeline original (demais publicações relevantes por heurística)
             for blob in extract_xml_from_zip(zb):
                 pubs.extend(parse_xml_bytes(blob))
         
+        # merge anti-duplicação
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -219,26 +256,12 @@ async def processar_inlabs(
                 merged.append(p)
         
         texto = monta_whatsapp(merged, data)
+
+        # >>>>>>>>>> INSERÇÃO: antepor blocos MPO/MB ao texto padrão <<<<<<<<<<
+        if mpo_whatsapps:
+            texto = "\n\n".join([x for x in mpo_whatsapps if x.strip()]) + "\n\n" + texto
+
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
-
-# === MPO (MB) — Endpoint para parser TOTAL-GERAL por UG ===
-from fastapi import UploadFile, File
-from mb_portaria_parser import parse_zip_and_render, MB_UGS_DEFAULT
-
-@app.post("/dou/mpo/mb/parse")
-async def parse_mpo_mb(zip_file: UploadFile = File(...)):
-    """
-    Recebe um .zip com os XMLs do DOU e retorna:
-      - 'whatsapp': texto consolidado por Portaria (MPO) para UGs da MB
-      - 'portarias': JSON estruturado com totais e linhas por UG
-    """
-    data = await zip_file.read()
-    tmp = "/tmp/dou_upload.zip"
-    with open(tmp, "wb") as f:
-        f.write(data)
-
-    whatsapp_txt, payload = parse_zip_and_render(tmp, mb_ugs=MB_UGS_DEFAULT)
-    return {"ok": True, "whatsapp": whatsapp_txt, "portarias": payload}
 
