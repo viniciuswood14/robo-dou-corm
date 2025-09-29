@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 9.1 - CORREÇÃO DE ERRO E DEDUP ##########
+# ########## VERSÃO 9.3 - AJUSTE DE TEXTO E DATA ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v9.1 Corrigido")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v9.3 Texto Ajustado")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -39,10 +39,10 @@ MPO_NAVY_TAGS = {
 
 KEYWORDS_DIRECT_INTEREST = [
     "ministério da defesa", "força armanda", "forças armandas",
-    "comando da marinha", "marinha do brasil", "fundo naval",
+    "comandos da marinha", "comando da marinha", "marinha do brasil", "fundo naval",
     "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha",
     "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo",
-    "programa nuclear brasileiro", "programa nuclear da marinha", "fragata", "PFCT", "navio-patrulha", "navios-patrulhas", "PROSUB", "construçáo naval", "BR do Mar", "Fundo da Marinha Mercante", "Ensino Profissional Marítimo", "Adicional ao Frete para Renovação da Marinha Mercante", "FDEPM", "AMAZUL", "EMGEPRON"
+    "programa nuclear brasileiro"
 ]
 BUDGET_KEYWORDS = [
     "crédito suplementar", "crédito extraordinário", "execução orçamentária",
@@ -76,14 +76,37 @@ def norm(s: Optional[str]) -> str:
     return _ws.sub(" ", s).strip()
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    # ... (código inalterado)
-    lines = ["Bom dia!","","PTC as seguintes publicações de interesse:"]
-    try: dt = datetime.fromisoformat(when); dd = dt.strftime("%d%b").upper()
-    except Exception: dd = when
-    lines += [f"DOU {dd}:","", "🔰 Seção 1",""]
+    # ##################################################################
+    # MUDANÇA AQUI: Nova saudação e formato de data em português
+    # ##################################################################
+    
+    # Dicionário para garantir o mês em português
+    meses_pt = {
+        1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN",
+        7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"
+    }
+
+    try:
+        dt = datetime.fromisoformat(when)
+        # Formata a data como DDMMM (ex: 29SET)
+        dd = f"{dt.day:02d}{meses_pt.get(dt.month, '')}"
+    except Exception:
+        dd = when # Mantém o formato original em caso de erro
+
+    # Nova estrutura do cabeçalho
+    lines = [
+        "Bom dia, senhores!",
+        "",
+        f"PTC as seguintes publicações de interesse no DOU de {dd}:",
+        "",
+        "🔰 Seção 1",
+        ""
+    ]
+
     if not pubs:
         lines.append("— Sem ocorrências para os critérios informados —")
         return "\n".join(lines)
+    
     for p in pubs:
         lines.append(f"▶️ {p.organ or 'Órgão'}")
         lines.append(f"📌 {p.type or 'Ato/Portaria'}")
@@ -93,11 +116,12 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         else:
             lines.append("⚓ Para conhecimento.")
         lines.append("")
+        
     return "\n".join(lines)
 
 
 def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
-    # ... (lógica interna desta função inalterada)
+    # ... (código inalterado)
     organ = norm(main_article.get('artCategory', ''))
     body = main_article.find('body')
     if not body: return None
@@ -239,7 +263,6 @@ async def processar_inlabs(
                 if publication:
                     pubs.append(publication)
         
-        # MUDANÇA: Bloco de deduplicação reintroduzido e corrigido
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -249,9 +272,6 @@ async def processar_inlabs(
                 merged.append(p)
         
         texto = monta_whatsapp(merged, data)
-        # MUDANÇA: A variável na linha de retorno foi corrigida de 'merged' para 'merged' (ops, de 'pubs' para 'merged')
-        # A correção real é usar a variável correta na linha de retorno. Na v9.0 o erro era usar 'merged' que não existia.
-        # Agora estamos usando 'merged' que acabamos de criar.
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
         await client.aclose()
