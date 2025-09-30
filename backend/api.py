@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # ##################################################################
-# ########## VERSÃO 13.1 - CORREÇÃO FINAL DA FONTE PÚBLICA ##########
+# ########## VERSÃO 13.2 - CORREÇÃO FINAL DA FONTE PÚBLICA ##########
 # ##################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.1 Fonte Dupla Corrigida")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.2 Fonte Dupla Corrigida")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -57,8 +57,7 @@ def norm(s: Optional[str]) -> str:
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     meses_pt = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"}
     try:
-        dt = datetime.fromisoformat(when)
-        dd = f"{dt.day:02d}{meses_pt.get(dt.month, '')}"
+        dt = datetime.fromisoformat(when); dd = f"{dt.day:02d}{meses_pt.get(dt.month, '')}"
     except Exception: dd = when
     lines = ["Bom dia, senhores!", "", f"PTC as seguintes publicações de interesse no DOU de {dd}:", ""]
     pubs_by_section: Dict[str, List[Publicacao]] = {}
@@ -242,7 +241,7 @@ def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> 
     display_text = norm(materia_soup.get_text(strip=True))
 
     if not identifica: return None
-    if not summary: summary = display_text[:700] + '...'
+    if not summary: summary = display_text[:700]
 
     is_relevant = False
     reason = None
