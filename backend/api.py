@@ -9,11 +9,11 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# #######################################################################
-# ########## VERSÃO 12.2 - EXTRATOR DE DADOS DE TABELA CORRIGIDO ##########
-# #######################################################################
+# #####################################################################
+# ########## VERSÃO 12.3 - EXTRATOR DE TABELA DEFINITIVO ##########
+# #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.2 Extrator Corrigido")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.3 Extrator Definitivo")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -36,18 +36,11 @@ NAMES_TO_TRACK = sorted(list(set(["CLAYTON LUIZ MONTES", "ANTONIO CARLOS FRISSO 
 TERMS_AND_ACRONYMS_S2 = ["SOF", "SG-MD", "SEORI-MD", "DEORG-MD", "DEOFM", "VAlte (IM)", "CAlte (IM)", "CMG (IM)", "CF (IM)", "CC (IM)", "CT (IM)", "1T (IM)", "2T (IM)"]
 
 class Publicacao(BaseModel):
-    organ: Optional[str] = None
-    type: Optional[str] = None
-    summary: Optional[str] = None
-    raw: Optional[str] = None
-    relevance_reason: Optional[str] = None
-    section: Optional[str] = None
+    organ: Optional[str] = None; type: Optional[str] = None; summary: Optional[str] = None
+    raw: Optional[str] = None; relevance_reason: Optional[str] = None; section: Optional[str] = None
 
 class ProcessResponse(BaseModel):
-    date: str
-    count: int
-    publications: List[Publicacao]
-    whatsapp_text: str
+    date: str; count: int; publications: List[Publicacao]; whatsapp_text: str
 
 _ws = re.compile(r"\s+")
 def norm(s: Optional[str]) -> str:
@@ -59,25 +52,20 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     try:
         dt = datetime.fromisoformat(when)
         dd = f"{dt.day:02d}{meses_pt.get(dt.month, '')}"
-    except Exception:
-        dd = when
+    except Exception: dd = when
     lines = ["Bom dia, senhores!", "", f"PTC as seguintes publicações de interesse no DOU de {dd}:", ""]
     pubs_by_section: Dict[str, List[Publicacao]] = {}
     for p in pubs:
-        sec = p.section or "DOU"
-        if sec not in pubs_by_section:
-            pubs_by_section[sec] = []
+        sec = p.section or "DOU";
+        if sec not in pubs_by_section: pubs_by_section[sec] = []
         pubs_by_section[sec].append(p)
     if not pubs:
-        lines.append("— Sem ocorrências para os critérios informados —")
-        return "\n".join(lines)
+        lines.append("— Sem ocorrências para os critérios informados —"); return "\n".join(lines)
     for section_name in sorted(pubs_by_section.keys()):
         if not pubs_by_section[section_name]: continue
-        lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
-        lines.append("")
+        lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}"); lines.append("")
         for p in pubs_by_section[section_name]:
-            lines.append(f"▶️ {p.organ or 'Órgão'}")
-            lines.append(f"📌 {p.type or 'Ato/Portaria'}")
+            lines.append(f"▶️ {p.organ or 'Órgão'}"); lines.append(f"📌 {p.type or 'Ato/Portaria'}")
             if p.summary: lines.append(p.summary)
             if p.relevance_reason and '\n' in p.relevance_reason:
                 lines.append(f"⚓\n{p.relevance_reason}")
@@ -90,66 +78,58 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
 
 def parse_gnd_change_table(full_text_content: str) -> str:
     soup = BeautifulSoup(full_text_content, 'lxml-xml')
-    acrescimos = []
-    reducoes = []
-    current_operation = None
+    results = {'acrescimo': [], 'reducao': []}
     current_unidade = None
+    current_operation = None
 
     for table in soup.find_all('table'):
         for row in table.find_all('tr'):
-            # Lógica para identificar cabeçalhos de seção (Unidade, Operação)
-            # Essas linhas geralmente têm poucas colunas ou células que se expandem
-            if len(row.find_all('td')) < 5:
-                row_text = row.get_text(" ", strip=True).upper()
-                if "UNIDADE:" in row_text:
-                    match = re.search(r'UNIDADE:\s*(.*)', row.get_text(" ", strip=True))
-                    if match:
-                        current_unidade = match.group(1)
-                elif "ACRÉSCIMO" in row_text:
-                    current_operation = "acrescimo"
-                elif "REDUÇÃO" in row_text or "CANCELAMENTO" in row_text:
-                    current_operation = "reducao"
+            cols = row.find_all('td')
+            row_text = " ".join(norm(c.get_text()) for c in cols)
+
+            if "UNIDADE:" in row_text:
+                current_unidade = row_text.replace("UNIDADE:", "").strip()
+                continue
+            if "ACRÉSCIMO" in row_text.upper():
+                current_operation = "acrescimo"
+                continue
+            if "REDUÇÃO" in row_text.upper() or "CANCELAMENTO" in row_text.upper():
+                current_operation = "reducao"
                 continue
 
-            # Processa apenas linhas de dados sob uma unidade de interesse
-            if current_unidade and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
-                cols = row.find_all('td')
-                if len(cols) == 10:
-                    try:
-                        ao = cols[0].get_text(" ", strip=True)
-                        desc = cols[1].get_text(" ", strip=True)
-                        gnd = cols[4].get_text(" ", strip=True).replace('-','').replace('ODC','').replace('INV','')
-                        valor = cols[9].get_text(" ", strip=True)
+            if len(cols) == 10 and current_unidade and current_operation and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
+                try:
+                    ao = norm(cols[0].get_text())
+                    desc = norm(cols[1].get_text())
+                    gnd = norm(cols[4].get_text()).replace('-','').replace('ODC','').replace('INV','')
+                    valor = norm(cols[9].get_text())
 
-                        if "PROGRAMÁTICA" in ao.upper() or "TOTAL" in ao.upper() or not valor:
-                            continue
-                        
-                        line = f"- AO {ao} - {desc} | GND: {gnd} | Valor: {valor}"
-                        if current_operation == "acrescimo":
-                            acrescimos.append((current_unidade, line))
-                        elif current_operation == "reducao":
-                            reducoes.append((current_unidade, line))
-                    except IndexError:
+                    if "PROGRAMÁTICA" in ao.upper() or not valor:
                         continue
+                    
+                    line = f"- AO {ao} - {desc} | GND: {gnd} | Valor: {valor}"
+                    results[current_operation].append((current_unidade, line))
+                except IndexError:
+                    continue
     
     output_lines = ["Ato de Alteração de GND com impacto na Defesa/Marinha. Dados extraídos dos anexos:"]
     
-    if not acrescimos and not reducoes:
+    if not results['acrescimo'] and not results['reducao']:
         return "Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise manual dos anexos."
 
-    if acrescimos:
+    if results['acrescimo']:
         output_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
         last_unidade = None
-        for unidade, line in sorted(acrescimos):
+        for unidade, line in sorted(results['acrescimo']):
             if unidade != last_unidade:
                 output_lines.append(f"*{unidade}*")
                 last_unidade = unidade
             output_lines.append(line)
 
-    if reducoes:
+    if results['reducao']:
         output_lines.append("\n**-- REDUÇÕES (Cancelamento) --**")
         last_unidade = None
-        for unidade, line in sorted(reducoes):
+        for unidade, line in sorted(results['reducao']):
             if unidade != last_unidade:
                 output_lines.append(f"*{unidade}*")
                 last_unidade = unidade
@@ -228,12 +208,8 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
 
     if is_relevant:
         return Publicacao(
-            organ=organ,
-            type=act_type,
-            summary=summary,
-            raw=display_text,
-            relevance_reason=reason,
-            section=section
+            organ=organ, type=act_type, summary=summary,
+            raw=display_text, relevance_reason=reason, section=section
         )
     return None
 
