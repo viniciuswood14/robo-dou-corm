@@ -255,21 +255,19 @@ def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> 
     if "DO1" in section_str.upper():
         is_mpo = MPO_ORG_STRING in organ.lower()
         if is_mpo:
-            if any(code in search_content_lower for code in MPO_NAVY_TAGS):
+            if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 summary_lower = summary.lower()
                 if "altera parcialmente grupos de natureza de despesa" in summary_lower:
-                    reason = "Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise manual."
+                    reason = "Ato de Alteração de GND. Recomenda-se análise manual dos anexos."
                 elif "os limites de movimentação e empenho constantes" in summary_lower:
-                    reason = TEMPLATE_LME
+                    reason = "Ato de Alteração de Limite de Movimentação. Recomenda-se análise manual."
                 elif "modifica fontes de recursos" in summary_lower:
-                    reason = TEMPLATE_FONTE
+                    reason = "Ato de Modificação de Fontes. Recomenda-se análise manual."
                 elif "abre aos orçamentos fiscal" in summary_lower:
-                    reason = TEMPLATE_CREDITO
+                    reason = "Ato de Crédito Suplementar. Recomenda-se análise manual."
                 else:
-                    reason = ANNOTATION_POSITIVE_GENERIC
-            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
-                is_relevant = True; reason = ANNOTATION_NEGATIVE
+                    reason = ANNOTATION_NEGATIVE
         else:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
@@ -277,17 +275,12 @@ def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> 
     
     elif "DO2" in section_str.upper():
         clean_search_content_lower = re.sub(r'assinatura\s*eletrônica', '', search_content_lower, flags=re.I)
-        for term in TERMS_AND_ACRONYMS_S2:
-            if term.lower() in clean_search_content_lower:
-                is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{term}'."; break
-        if not is_relevant:
-            for name in NAMES_TO_TRACK:
-                for match in re.finditer(name.lower(), clean_search_content_lower):
-                    start_pos = max(0, match.start() - 150)
-                    context_window = clean_search_content_lower[start_pos:match.start()]
-                    if any(verb in context_window for verb in PERSONNEL_ACTION_VERBS):
-                        is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."; break
-                if is_relevant: break
+        combined_keywords_s2 = TERMS_AND_ACRONYMS_S2 + NAMES_TO_TRACK
+        for kw in combined_keywords_s2:
+            if kw.lower() in clean_search_content_lower:
+                is_relevant = True
+                reason = f"Ato de pessoal (Seção 2): menção a '{kw}'."
+                break
 
     if is_relevant:
         return Publicacao(
@@ -349,7 +342,7 @@ async def processar(
             await client.aclose()
 
     elif source.upper() == "PUBLICO":
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             for section_str in secs:
                 try:
                     html_content = await fetch_public_dou_html(client, data, section_str)
