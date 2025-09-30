@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 13.0 - FONTE DUPLA (INLABS + PÚBLICO) ##########
+# ########## VERSÃO 13.1 - CORREÇÃO DA FONTE PÚBLICA ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.0 Fonte Dupla")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.1 Fonte Dupla Corrigida")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -91,19 +91,15 @@ def parse_gnd_change_table(full_text_content: str) -> str:
     results = {'acrescimo': [], 'reducao': []}
     text_blocks = re.split(r'ÓRGÃO:', full_text_content)
     for block in text_blocks:
-        if not any(tag in block for tag in MPO_NAVY_TAGS.keys()):
-            continue
+        if not any(tag in block for tag in MPO_NAVY_TAGS.keys()): continue
         block_soup = BeautifulSoup(block, 'lxml-xml')
         unidade_tag = block_soup.find('p', string=re.compile(r'UNIDADE:'))
         if not unidade_tag: continue
         current_unidade = unidade_tag.get_text(strip=True).replace("UNIDADE:", "").strip()
         current_operation = None
-        if "ACRÉSCIMO" in block.upper():
-            current_operation = "acrescimo"
-        elif "REDUÇÃO" in block.upper() or "CANCELAMENTO" in block.upper():
-            current_operation = "reducao"
-        else:
-            continue
+        if "ACRÉSCIMO" in block.upper(): current_operation = "acrescimo"
+        elif "REDUÇÃO" in block.upper() or "CANCELAMENTO" in block.upper(): current_operation = "reducao"
+        else: continue
         for table in block_soup.find_all('table'):
             for row in table.find_all('tr'):
                 cols = row.find_all('td')
@@ -114,24 +110,20 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                         clean_gnd = gnd.replace('-','').replace('ODC','').replace('INV','')
                         line = f"- AO {ao} - {desc} | GND: {clean_gnd} | Valor: {valor}"
                         results[current_operation].append((current_unidade, line))
-                    except (IndexError, ValueError):
-                        continue
+                    except (IndexError, ValueError): continue
     if not results['acrescimo'] and not results['reducao']:
         return "Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise manual dos anexos."
     output_lines = ["Ato de Alteração de GND com impacto na Defesa/Marinha. Dados extraídos dos anexos:"]
     if results['acrescimo']:
         output_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
-        for unidade, line in sorted(results['acrescimo']):
-            output_lines.append(line)
+        for unidade, line in sorted(results['acrescimo']): output_lines.append(line)
     if results['reducao']:
         output_lines.append("\n**-- REDUÇÕES (Cancelamento) --**")
-        for unidade, line in sorted(results['reducao']):
-            output_lines.append(line)
+        for unidade, line in sorted(results['reducao']): output_lines.append(line)
     return "\n".join(output_lines)
 
 def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
-    organ = norm(main_article.get('artCategory', ''))
-    section = main_article.get('pubName', '').upper()
+    organ = norm(main_article.get('artCategory', '')); section = main_article.get('pubName', '').upper()
     body = main_article.find('body')
     if not body: return None
     act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
@@ -141,11 +133,8 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
     if not summary:
         match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
         if match: summary = norm(match.group(1))
-
-    is_relevant = False
-    reason = None
+    is_relevant = False; reason = None
     search_content_lower = norm(full_text_content).lower()
-
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ.lower()
         if is_mpo:
@@ -153,38 +142,24 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
             if found_navy_codes:
                 is_relevant = True
                 summary_lower = summary.lower()
-                if "altera parcialmente grupos de natureza de despesa" in summary_lower:
-                    reason = parse_gnd_change_table(full_text_content)
-                elif "os limites de movimentação e empenho constantes" in summary_lower:
-                    reason = TEMPLATE_LME
-                elif "modifica fontes de recursos" in summary_lower:
-                    reason = TEMPLATE_FONTE
-                elif "abre aos orçamentos fiscal" in summary_lower:
-                    reason = TEMPLATE_CREDITO
-                else:
-                    reason = ANNOTATION_POSITIVE_GENERIC
+                if "altera parcialmente grupos de natureza de despesa" in summary_lower: reason = parse_gnd_change_table(full_text_content)
+                elif "os limites de movimentação e empenho constantes" in summary_lower: reason = TEMPLATE_LME
+                elif "modifica fontes de recursos" in summary_lower: reason = TEMPLATE_FONTE
+                elif "abre aos orçamentos fiscal" in summary_lower: reason = TEMPLATE_CREDITO
+                else: reason = ANNOTATION_POSITIVE_GENERIC
             elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
-                is_relevant = True
-                reason = ANNOTATION_NEGATIVE
+                is_relevant = True; reason = ANNOTATION_NEGATIVE
         else:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
-                    is_relevant = True
-                    reason = f"Há menção específica à TAG: '{kw}'."
-                    break
-    
+                    is_relevant = True; reason = f"Há menção específica à TAG: '{kw}'."; break
     elif "DO2" in section:
         soup_copy = BeautifulSoup(full_text_content, 'lxml-xml')
-        for tag in soup_copy.find_all('p', class_=['assina', 'cargo']):
-            tag.decompose()
+        for tag in soup_copy.find_all('p', class_=['assina', 'cargo']): tag.decompose()
         clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
-
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
-                is_relevant = True
-                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
-                break
-        
+                is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{term}'."; break
         if not is_relevant:
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
@@ -192,17 +167,10 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
                     start_pos = max(0, match.start() - 150)
                     context_window = clean_search_content_lower[start_pos:match.start()]
                     if any(verb in context_window for verb in PERSONNEL_ACTION_VERBS):
-                        is_relevant = True
-                        reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."
-                        break
-                if is_relevant:
-                    break
-
+                        is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."; break
+                if is_relevant: break
     if is_relevant:
-        return Publicacao(
-            organ=organ, type=act_type, summary=summary,
-            raw=display_text, relevance_reason=reason, section=section
-        )
+        return Publicacao(organ=organ, type=act_type, summary=summary, raw=display_text, relevance_reason=reason, section=section)
     return None
 
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
@@ -256,9 +224,12 @@ async def fetch_public_dou_html(client: httpx.AsyncClient, date: str, section: s
         formatted_date = datetime.fromisoformat(date).strftime('%Y-%m-%d')
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de data inválido. Use YYYY-MM-DD.")
-    section_num = re.sub(r'[^0-9]', '', section)
-    if not section_num: raise HTTPException(status_code=400, detail=f"Seção inválida: {section}")
-    url = f"https://www.in.gov.br/web/dou/-/{section_num}?edicao={formatted_date}"
+    section_num_search = re.search(r'(\d+)', section)
+    if not section_num_search: raise HTTPException(status_code=400, detail=f"Seção inválida: {section}")
+    section_num = section_num_search.group(1)
+    
+    url = f"https://www.in.gov.br/en/web/dou/-/{section_num}?edicao={formatted_date}"
+    
     try:
         r = await client.get(url, follow_redirects=True, timeout=90)
         r.raise_for_status()
@@ -308,18 +279,14 @@ def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> 
         clean_search_content_lower = re.sub(r'assinatura\s*eletrônica', '', search_content_lower, flags=re.I)
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
-                is_relevant = True
-                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
-                break
+                is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{term}'."; break
         if not is_relevant:
             for name in NAMES_TO_TRACK:
                 for match in re.finditer(name.lower(), clean_search_content_lower):
                     start_pos = max(0, match.start() - 150)
                     context_window = clean_search_content_lower[start_pos:match.start()]
                     if any(verb in context_window for verb in PERSONNEL_ACTION_VERBS):
-                        is_relevant = True
-                        reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."
-                        break
+                        is_relevant = True; reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."; break
                 if is_relevant: break
 
     if is_relevant:
