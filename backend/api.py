@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # ####################################################################
-# ########## VERSÃO 11.0 - CLASSIFICADOR INTELIGENTE DO MPO ##########
+# ########## VERSÃO 12.0 - FASE 2: EXTRATOR DE DADOS (GND) ##########
 # ####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v11.0 Classificador MPO")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.0 Extrator de Dados")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -123,6 +123,71 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             lines.append("")
     return "\n".join(lines)
 
+def parse_gnd_change_table(full_text_content: str) -> str:
+    soup = BeautifulSoup(full_text_content, 'lxml-xml')
+    tables = soup.find_all('table')
+    
+    acrescimos = []
+    reducoes = []
+    
+    current_operation = None
+    current_unidade = None
+
+    for table in tables:
+        rows = table.find_all('tr')
+        for row in rows:
+            cols = row.find_all('td')
+            row_text = row.get_text(" ", strip=True)
+            if "UNIDADE:" in row_text:
+                current_unidade = re.sub(r'^UNIDADE: ', '', row_text)
+            elif "( ACRÉSCIMO )" in row_text:
+                current_operation = "acrescimo"
+            elif "( REDUÇÃO )" in row_text or "( CANCELAMENTO )" in row_text:
+                current_operation = "reducao"
+
+            if len(cols) < 10:
+                continue
+
+            if current_unidade and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
+                try:
+                    ao = cols[0].get_text(" ", strip=True)
+                    desc = cols[1].get_text(" ", strip=True)
+                    gnd = cols[4].get_text(" ", strip=True)
+                    valor = cols[9].get_text(" ", strip=True)
+
+                    if "PROGRAMÁTICA" in ao or "TOTAL" in ao or not valor:
+                        continue
+                    
+                    line = f" - AO: {ao} | Desc: {desc} | GND: {gnd} | Valor: {valor}"
+                    if current_operation == "acrescimo":
+                        acrescimos.append((current_unidade, line))
+                    elif current_operation == "reducao":
+                        reducoes.append((current_unidade, line))
+                except IndexError:
+                    continue
+    
+    output_lines = ["Ato de Alteração de GND com impacto na Defesa/Marinha. Dados extraídos dos anexos:"]
+    
+    if acrescimos:
+        output_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
+        last_unidade = None
+        for unidade, line in acrescimos:
+            if unidade != last_unidade:
+                output_lines.append(f"*{unidade}*")
+                last_unidade = unidade
+            output_lines.append(line)
+
+    if reducoes:
+        output_lines.append("\n**-- REDUÇÕES (Cancelamento) --**")
+        last_unidade = None
+        for unidade, line in reducoes:
+            if unidade != last_unidade:
+                output_lines.append(f"*{unidade}*")
+                last_unidade = unidade
+            output_lines.append(line)
+            
+    return "\n".join(output_lines)
+
 def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
     organ = norm(main_article.get('artCategory', ''))
     section = main_article.get('pubName', '').upper()
@@ -143,12 +208,12 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ.lower()
         if is_mpo:
-            found_navy_tags = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
-            if found_navy_tags:
+            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
+            if found_navy_codes:
                 is_relevant = True
                 summary_lower = summary.lower()
                 if "altera parcialmente grupos de natureza de despesa" in summary_lower:
-                    reason = TEMPLATE_GND
+                    reason = parse_gnd_change_table(full_text_content)
                 elif "os limites de movimentação e empenho constantes" in summary_lower:
                     reason = TEMPLATE_LME
                 elif "modifica fontes de recursos" in summary_lower:
@@ -193,11 +258,10 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
                     break
 
     if is_relevant:
-        final_summary = summary if summary else (display_text[:500] + '...' if len(display_text) > 500 else display_text)
         return Publicacao(
             organ=organ,
             type=act_type,
-            summary=final_summary,
+            summary=summary,
             raw=display_text,
             relevance_reason=reason,
             section=section
