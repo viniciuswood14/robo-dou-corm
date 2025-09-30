@@ -214,3 +214,12 @@ button svg { stroke: white; }
   font-weight: 600;
   color: var(--navy-blue);
 }
+.source-selector {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+}
+.source-selector label {
+  cursor: pointer;
+  margin-right: 10px;
+}
