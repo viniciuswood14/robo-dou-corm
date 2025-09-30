@@ -9,11 +9,11 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# ####################################################################
-# ########## VERSÃO 12.0 - FASE 2: EXTRATOR DE DADOS (GND) ##########
-# ####################################################################
+# #######################################################################
+# ########## VERSÃO 12.1 - CORREÇÃO NO EXTRATOR DE DADOS (GND) ##########
+# #######################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.0 Extrator de Dados")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.1 Extrator Corrigido")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -24,14 +24,6 @@ INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
 # ====== TEMPLATES DE ANOTAÇÃO PARA O MPO ======
-TEMPLATE_GND = """Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise para detalhar os valores abaixo:
-
-Suplementação (valor total):
-AO | Descrição | GND | Valor
-
-Cancelamento (valor total):
-AO | Descrição | GND | Valor"""
-
 TEMPLATE_LME = """Ato de Alteração de Limite de Movimentação com impacto na Defesa/Marinha. Recomenda-se análise para detalhar os valores abaixo:
 
 Ampliação de LME - (RPX): 
@@ -137,12 +129,17 @@ def parse_gnd_change_table(full_text_content: str) -> str:
         rows = table.find_all('tr')
         for row in rows:
             cols = row.find_all('td')
-            row_text = row.get_text(" ", strip=True)
-            if "UNIDADE:" in row_text:
-                current_unidade = re.sub(r'^UNIDADE: ', '', row_text)
-            elif "( ACRÉSCIMO )" in row_text:
+            row_text_upper = row.get_text(" ", strip=True).upper()
+            
+            # Tenta extrair a Unidade da linha inteira
+            if "UNIDADE:" in row_text_upper:
+                match = re.search(r'UNIDADE:\s*(.*)', row.get_text(" ", strip=True))
+                if match:
+                    current_unidade = match.group(1)
+            # CORREÇÃO: Busca flexível por ACRÉSCIMO/REDUÇÃO
+            elif "ACRÉSCIMO" in row_text_upper:
                 current_operation = "acrescimo"
-            elif "( REDUÇÃO )" in row_text or "( CANCELAMENTO )" in row_text:
+            elif "REDUÇÃO" in row_text_upper or "CANCELAMENTO" in row_text_upper:
                 current_operation = "reducao"
 
             if len(cols) < 10:
@@ -152,13 +149,13 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                 try:
                     ao = cols[0].get_text(" ", strip=True)
                     desc = cols[1].get_text(" ", strip=True)
-                    gnd = cols[4].get_text(" ", strip=True)
+                    gnd = cols[4].get_text(" ", strip=True).replace('-','').replace('ODC','').replace('INV','')
                     valor = cols[9].get_text(" ", strip=True)
 
-                    if "PROGRAMÁTICA" in ao or "TOTAL" in ao or not valor:
+                    if "PROGRAMÁTICA" in ao.upper() or "TOTAL" in ao.upper() or not valor:
                         continue
                     
-                    line = f" - AO: {ao} | Desc: {desc} | GND: {gnd} | Valor: {valor}"
+                    line = f"- AO {ao} - {desc} | GND: {gnd} | Valor: {valor}"
                     if current_operation == "acrescimo":
                         acrescimos.append((current_unidade, line))
                     elif current_operation == "reducao":
@@ -168,6 +165,9 @@ def parse_gnd_change_table(full_text_content: str) -> str:
     
     output_lines = ["Ato de Alteração de GND com impacto na Defesa/Marinha. Dados extraídos dos anexos:"]
     
+    if not acrescimos and not reducoes:
+        return "Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise manual dos anexos."
+
     if acrescimos:
         output_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
         last_unidade = None
