@@ -10,30 +10,34 @@
   <a href="index.html" class="back-link">← Voltar para a Página Inicial</a>
   <main class="card">
     <header class="card-header">
-      <img src="logo-marinha.png" alt="Logotipo da Marinha do Brasil" class="logo" />
+      <img src="logo-marinha.svg" alt="Logotipo da Marinha do Brasil" class="logo" />
       <h1>Robô de Monitoramento do DOU</h1>
     </header>
+    
+    <div class="row">
+        <label>Fonte de Consulta</label>
+        <div class="source-selector">
+            <input type="radio" id="source_inlabs" name="source" value="INLABS" checked>
+            <label for="source_inlabs">INLABS (XML - Padrão)</label>
+            <input type="radio" id="source_publico" name="source" value="PUBLICO">
+            <label for="source_publico">Site Público (HTML - Alternativo)</label>
+        </div>
+    </div>
 
     <div class="row">
       <label for="data">Data (YYYY-MM-DD)</label>
       <input id="data" type="date" />
     </div>
 
-<div class="row">
+    <div class="row">
       <label for="sections">Seções (separadas por vírgula, ex: DO1,DO2)</label>
       <input id="sections" type="text" placeholder="DO1,DO2" value="DO1,DO2" />
     </div>
 
-    <details class="adv">
-      <summary>Opções avançadas (palavras-chave)</summary>
-      <p class="hint">Se deixar vazio, o backend usa o conjunto padrão de filtros inteligentes.</p>
-      <textarea id="keywords" rows="3" placeholder='["Marinha","Fundo Naval"]' disabled title="Desativado em favor da lógica inteligente do backend"></textarea>
-    </details>
-
     <div class="actions">
       <button id="btnProcessar">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-        Processar no INLABS
+        Processar
       </button>
       <button id="btnCopiar" disabled>Copiar Relatório</button>
     </div>
@@ -44,3 +48,4 @@
   <script src="app.js"></script>
 </body>
 </html>
+
