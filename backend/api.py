@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #############################################################
-# ########## VERSÃO 13.1 - CORREÇÃO DA FONTE PÚBLICA ##########
+# ########## VERSÃO 13.0 - FONTE DUPLA (INLABS + PÚBLICO) ##########
 # #############################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.1 Fonte Dupla Corrigida")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.0 Fonte Dupla")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -216,37 +216,32 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     return xml_blobs
 
 # ===============================================================
-# FUNÇÕES PARA FONTE: SITE PÚBLICO (HTML)
+# FUNÇÕES PARA FONTE: SITE PÚBLICO (HTML) - CORRIGIDAS
 # ===============================================================
 
-async def fetch_public_dou_html(client: httpx.AsyncClient, date: str, section: str) -> str:
+async def fetch_public_dou_html(client: httpx.AsyncClient, date: str) -> str:
     try:
-        formatted_date = datetime.fromisoformat(date).strftime('%Y-%m-%d')
+        formatted_date = datetime.fromisoformat(date).strftime('%d-%m-%Y')
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de data inválido. Use YYYY-MM-DD.")
-    section_num_search = re.search(r'(\d+)', section)
-    if not section_num_search: raise HTTPException(status_code=400, detail=f"Seção inválida: {section}")
-    section_num = section_num_search.group(1)
-    
-    url = f"https://www.in.gov.br/en/web/dou/-/{section_num}?edicao={formatted_date}"
-    
+    url = f"https://www.in.gov.br/leiturajornal?data={formatted_date}"
     try:
         r = await client.get(url, follow_redirects=True, timeout=90)
         r.raise_for_status()
         return r.text
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Falha ao acessar o site público do DOU: HTTP {e.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"Falha ao acessar o site público do DOU ({url}): HTTP {e.response.status_code}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro de rede ao buscar no site público: {str(e)}")
 
 def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> Optional[Publicacao]:
-    organ = norm(materia_soup.select_one(".orgao-dou-data").get_text(strip=True) if materia_soup.select_one(".orgao-dou-data") else "")
+    organ = norm(materia_soup.select_one(".publicado-por").get_text(strip=True) if materia_soup.select_one(".publicado-por") else "")
     identifica = norm(materia_soup.select_one(".identifica").get_text(strip=True) if materia_soup.select_one(".identifica") else "")
     summary = norm(materia_soup.select_one(".ementa").get_text(strip=True) if materia_soup.select_one(".ementa") else "")
     display_text = norm(materia_soup.get_text(strip=True))
 
     if not identifica: return None
-    if not summary: summary = display_text[:700] + '...'
+    if not summary: summary = display_text[:700]
 
     is_relevant = False
     reason = None
@@ -275,7 +270,7 @@ def parse_public_html_materia(materia_soup: BeautifulSoup, section_str: str) -> 
     
     elif "DO2" in section_str.upper():
         clean_search_content_lower = re.sub(r'assinatura\s*eletrônica', '', search_content_lower, flags=re.I)
-        combined_keywords_s2 = TERMS_AND_ACRONYMS_S2 + NAMES_TO_TRACK
+        combined_keywords_s2 = TERMS_AND_ACRONYMS_S2 + NAMES_TO_TRACK + PERSONNEL_ACTION_VERBS
         for kw in combined_keywords_s2:
             if kw.lower() in clean_search_content_lower:
                 is_relevant = True
@@ -342,19 +337,27 @@ async def processar(
             await client.aclose()
 
     elif source.upper() == "PUBLICO":
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            for section_str in secs:
-                try:
-                    html_content = await fetch_public_dou_html(client, data, section_str)
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    materias_html = soup.select(".materia-dou")
-                    if not materias_html: continue
+        async with httpx.AsyncClient() as client:
+            try:
+                html_content = await fetch_public_dou_html(client, data)
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                for section_str in secs:
+                    section_num_search = re.search(r'(\d+)', section_str)
+                    if not section_num_search: continue
+                    section_id = f"secao-{section_num_search.group(1)}"
+                    
+                    section_container = soup.select_one(f"#{section_id}")
+                    if not section_container: continue
+                    
+                    materias_html = section_container.select(".publicacao")
                     for materia_soup in materias_html:
                         publication = parse_public_html_materia(materia_soup, section_str)
                         if publication:
                             pubs.append(publication)
-                except HTTPException:
-                    continue
+            except HTTPException as e:
+                 raise e
+
     else:
         raise HTTPException(status_code=400, detail="Fonte de dados inválida. Use 'INLABS' ou 'PUBLICO'.")
 
