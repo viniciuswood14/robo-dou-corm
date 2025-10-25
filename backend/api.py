@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 12.4 - CONFIG EXTERNA E KEYWORDS ##########
+# ########## VERSÃO 12.5 - EXTRATOR DE CONTEXTO ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.4 Config Externa")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.5 Extrator de Contexto")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -161,6 +161,13 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             
     return "\n".join(output_lines)
 
+def _get_context(text: str, match: re.Match) -> str:
+    """Extrai o texto ao redor de um 'match' de regex."""
+    context_start = max(0, match.start() - 100)
+    context_end = min(len(text), match.end() + 200)
+    context_text = text[context_start:context_end]
+    return f"\"...{norm(context_text)}...\""
+
 def process_grouped_materia(
     main_article: BeautifulSoup, 
     full_text_content: str,
@@ -204,10 +211,12 @@ def process_grouped_materia(
                 is_relevant = True
                 reason = ANNOTATION_NEGATIVE
         else:
+            # Lógica de keywords S1 com CONTEXTO
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
-                if kw in search_content_lower:
+                match = re.search(re.escape(kw), search_content_lower, re.IGNORECASE)
+                if match:
                     is_relevant = True
-                    reason = f"Há menção específica à TAG: '{kw}'."
+                    reason = f"Contexto ('{kw}'): {_get_context(search_content_lower, match)}"
                     break
     
     elif "DO2" in section:
@@ -216,36 +225,45 @@ def process_grouped_materia(
             tag.decompose()
         clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
 
+        # Lógica de termos S2 com CONTEXTO
         for term in TERMS_AND_ACRONYMS_S2:
-            if term.lower() in clean_search_content_lower:
+            match = re.search(re.escape(term), clean_search_content_lower, re.IGNORECASE)
+            if match:
                 is_relevant = True
-                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
+                reason = f"Contexto ('{term}'): {_get_context(clean_search_content_lower, match)}"
                 break
         
         if not is_relevant:
+            # Lógica de nomes S2 com CONTEXTO
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
                 for match in re.finditer(name_lower, clean_search_content_lower):
                     start_pos = max(0, match.start() - 150)
-                    context_window = clean_search_content_lower[start_pos:match.start()]
-                    if any(verb in context_window for verb in PERSONNEL_ACTION_VERBS):
+                    context_window_text = clean_search_content_lower[start_pos:match.start()]
+                    
+                    if any(verb in context_window_text for verb in PERSONNEL_ACTION_VERBS):
                         is_relevant = True
-                        reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."
+                        # Pega a janela de contexto + o nome
+                        full_context_text = clean_search_content_lower[start_pos:match.end()]
+                        reason = f"Contexto ('{name}'): \"...{norm(full_context_text)}...\""
                         break
                 if is_relevant:
                     break
     
-    # Lógica de Palavra-Chave Personalizada (roda para todas as seções)
+    # Lógica de Palavra-Chave Personalizada (com CONTEXTO)
     found_custom_kw = None
+    custom_reason = None
     if custom_keywords:
         for kw in custom_keywords:
-            if kw in search_content_lower:
+            # Usa search_content_lower (texto completo) para keywords customizadas
+            match = re.search(re.escape(kw), search_content_lower, re.IGNORECASE)
+            if match:
                 found_custom_kw = kw
+                custom_reason = f"Contexto (Personalizada: '{kw}'): {_get_context(search_content_lower, match)}"
                 break
     
     if found_custom_kw:
         is_relevant = True # Garante que seja relevante
-        custom_reason = f"Há menção à palavra-chave personalizada: '{found_custom_kw}'."
         if reason and reason != ANNOTATION_NEGATIVE:
             # Se já tinha um motivo (ex: MPO), anexa
             reason = f"{reason}\n⚓ {custom_reason}"
@@ -363,7 +381,7 @@ async def processar_inlabs(
                     pubs.append(publication)
         
         seen: Set[str] = set()
-        merged: List[Publicacao] = []
+        merged: List[Publicoacao] = []
         for p in pubs:
             key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
             if key not in seen:
