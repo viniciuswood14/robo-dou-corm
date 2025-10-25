@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 12.4 - EXTRATOR DE TABELA (GND) CORRIGIDO ##########
+# ########## VERSÃO 12.3 - EXTRATOR DE TABELA DEFINITIVO ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.4 Extrator GND Corrigido")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.3 Extrator Definitivo")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -76,9 +76,6 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     return "\n".join(lines)
 
 def parse_gnd_change_table(full_text_content: str) -> str:
-    # ##################################################################
-    # FUNÇÃO REESCRITA (v12.3) PARA MAIOR ROBUSTEZ
-    # ##################################################################
     soup = BeautifulSoup(full_text_content, 'lxml-xml')
     results = {'acrescimo': [], 'reducao': []}
     current_unidade = None
@@ -115,16 +112,13 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             # Só extrai se tivermos uma unidade e operação válidas E se a unidade for de interesse
             if current_unidade and current_operation and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
                 try:
-                    ao = row_text_cells[0]
-                    desc = row_text_cells[1]
-                    gnd = row_text_cells[4].replace('-','').replace('ODC','').replace('INV','')
-                    valor = row_text_cells[9]
-
+                    ao, desc, _, _, gnd, _, _, _, _, valor = row_text_cells
                     if not valor: continue # Pula linhas sem valor
                     
-                    line = f"- AO {ao} - {desc} | GND: {gnd} | Valor: {valor}"
+                    clean_gnd = gnd.replace('-','').replace('ODC','').replace('INV','')
+                    line = f"- AO {ao} - {desc} | GND: {clean_gnd} | Valor: {valor}"
                     results[current_operation].append((current_unidade, line))
-                except IndexError:
+                except (IndexError, ValueError):
                     continue
     
     if not results['acrescimo'] and not results['reducao']:
@@ -137,7 +131,9 @@ def parse_gnd_change_table(full_text_content: str) -> str:
         last_unidade = None
         for unidade, line in sorted(results['acrescimo']):
             if unidade != last_unidade:
-                output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade.split(' ')[0], unidade)}*") # Mostra o nome bonito
+                # Mostra o nome bonito da unidade
+                unidade_code = unidade.split(' ')[0]
+                output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*") 
                 last_unidade = unidade
             output_lines.append(line)
 
@@ -146,7 +142,8 @@ def parse_gnd_change_table(full_text_content: str) -> str:
         last_unidade = None
         for unidade, line in sorted(results['reducao']):
             if unidade != last_unidade:
-                output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade.split(' ')[0], unidade)}*") # Mostra o nome bonito
+                unidade_code = unidade.split(' ')[0]
+                output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*")
                 last_unidade = unidade
             output_lines.append(line)
             
@@ -270,7 +267,6 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
             if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
     return xml_blobs
 
-# ESTA ROTA FOI MANTIDA PARA COMPATIBILIDADE COM SEU FRONTEND ATUAL (v1)
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
     data: str = Form(..., description="YYYY-MM-DD"),
