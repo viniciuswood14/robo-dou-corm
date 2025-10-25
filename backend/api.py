@@ -10,10 +10,10 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 12.5 - EXTRATOR DE CONTEXTO ##########
+# ########## VERSÃO 12.6 - LIMPEZA DE CONTEXTO (Anti-HTML/XML) ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.5 Extrator de Contexto")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.6 Limpeza de Contexto")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -88,6 +88,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     return "\n".join(lines)
 
 def parse_gnd_change_table(full_text_content: str) -> str:
+    # Esta função já usa BeautifulSoup internamente e está segura
     soup = BeautifulSoup(full_text_content, 'lxml-xml')
     results = {'acrescimo': [], 'reducao': []}
     current_unidade = None
@@ -101,11 +102,9 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             row_text_cells = [norm(c.get_text()) for c in cols]
             row_full_text = " ".join(row_text_cells)
 
-            # --- Lógica de Estado (Cabeçalhos) ---
-            # Um cabeçalho de 'UNIDADE' ou 'PROGRAMA' reseta o estado
             if "UNIDADE:" in row_full_text:
                 current_unidade = row_full_text.replace("UNIDADE:", "").strip()
-                continue # Pula para a próxima linha
+                continue 
             
             if "PROGRAMA DE TRABALHO" in row_full_text:
                 if "ACRÉSCIMO" in row_full_text.upper():
@@ -113,19 +112,16 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                 elif "REDUÇÃO" in row_full_text.upper() or "CANCELAMENTO" in row_full_text.upper():
                     current_operation = "reducao"
                 else:
-                    current_operation = None # Operação desconhecida
-                continue # Pula para a próxima linha
+                    current_operation = None
+                continue 
 
-            # Ignora linhas que não são de dados (cabeçalhos de tabela, etc.)
             if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.upper():
                 continue
 
-            # --- Lógica de Extração (Linhas de Dados) ---
-            # Só extrai se tivermos uma unidade e operação válidas E se a unidade for de interesse
             if current_unidade and current_operation and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
                 try:
                     ao, desc, _, _, gnd, _, _, _, _, valor = row_text_cells
-                    if not valor: continue # Pula linhas sem valor
+                    if not valor: continue
                     
                     clean_gnd = gnd.replace('-','').replace('ODC','').replace('INV','')
                     line = f"- AO {ao} - {desc} | GND: {clean_gnd} | Valor: {valor}"
@@ -143,7 +139,6 @@ def parse_gnd_change_table(full_text_content: str) -> str:
         last_unidade = None
         for unidade, line in sorted(results['acrescimo']):
             if unidade != last_unidade:
-                # Mostra o nome bonito da unidade
                 unidade_code = unidade.split(' ')[0]
                 output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*") 
                 last_unidade = unidade
@@ -161,16 +156,16 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             
     return "\n".join(output_lines)
 
-def _get_context(text: str, match: re.Match) -> str:
-    """Extrai o texto ao redor de um 'match' de regex."""
+def _get_context(clean_text: str, match: re.Match) -> str:
+    """Extrai o texto ao redor de um 'match' de regex (do texto limpo)."""
     context_start = max(0, match.start() - 100)
-    context_end = min(len(text), match.end() + 200)
-    context_text = text[context_start:context_end]
+    context_end = min(len(clean_text), match.end() + 200)
+    context_text = clean_text[context_start:context_end]
     return f"\"...{norm(context_text)}...\""
 
 def process_grouped_materia(
     main_article: BeautifulSoup, 
-    full_text_content: str,
+    full_text_content: str, # Este é o XML/HTML bruto
     custom_keywords: List[str]
 ) -> Optional[Publicacao]:
     
@@ -188,17 +183,35 @@ def process_grouped_materia(
 
     is_relevant = False
     reason = None
-    search_content_lower = norm(full_text_content).lower()
+    
+    # --- NOVO: Lógica de Limpeza de Texto ---
+    # Texto limpo para S1 e Custom Keywords (limpeza geral)
+    soup_full = BeautifulSoup(full_text_content, 'lxml-xml')
+    search_text_clean_s1 = norm(soup_full.get_text(strip=True))
+    search_content_lower_s1 = search_text_clean_s1.lower()
+    
+    # Texto limpo para S2 (limpeza especializada, remove assinaturas)
+    search_text_clean_s2 = ""
+    search_content_lower_s2 = ""
+    if "DO2" in section:
+        soup_s2 = BeautifulSoup(full_text_content, 'lxml-xml')
+        for tag in soup_s2.find_all('p', class_=['assina', 'cargo']):
+            tag.decompose()
+        search_text_clean_s2 = norm(soup_s2.get_text(strip=True))
+        search_content_lower_s2 = search_text_clean_s2.lower()
+    # --- Fim da Lógica de Limpeza ---
 
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ.lower()
         if is_mpo:
-            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
+            # Usa o texto limpo para achar os códigos de tag
+            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower_s1]
             if found_navy_codes:
                 is_relevant = True
                 summary_lower = summary.lower()
                 if "altera parcialmente grupos de natureza de despesa" in summary_lower:
-                    reason = parse_gnd_change_table(full_text_content)
+                    # Esta função usa o full_text_content (XML bruto) para parsear as tabelas
+                    reason = parse_gnd_change_table(full_text_content) 
                 elif "os limites de movimentação e empenho constantes" in summary_lower:
                     reason = TEMPLATE_LME
                 elif "modifica fontes de recursos" in summary_lower:
@@ -207,44 +220,39 @@ def process_grouped_materia(
                     reason = TEMPLATE_CREDITO
                 else:
                     reason = ANNOTATION_POSITIVE_GENERIC
-            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
+            # Usa o texto limpo para achar keywords de orçamento
+            elif any(bkw in search_content_lower_s1 for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 reason = ANNOTATION_NEGATIVE
         else:
-            # Lógica de keywords S1 com CONTEXTO
+            # Lógica de keywords S1 com CONTEXTO (busca no texto limpo S1)
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
-                match = re.search(re.escape(kw), search_content_lower, re.IGNORECASE)
+                match = re.search(re.escape(kw), search_content_lower_s1, re.IGNORECASE)
                 if match:
                     is_relevant = True
-                    reason = f"Contexto ('{kw}'): {_get_context(search_content_lower, match)}"
+                    reason = f"Contexto ('{kw}'): {_get_context(search_text_clean_s1, match)}"
                     break
     
     elif "DO2" in section:
-        soup_copy = BeautifulSoup(full_text_content, 'lxml-xml')
-        for tag in soup_copy.find_all('p', class_=['assina', 'cargo']):
-            tag.decompose()
-        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
-
-        # Lógica de termos S2 com CONTEXTO
+        # Lógica de termos S2 com CONTEXTO (busca no texto limpo S2)
         for term in TERMS_AND_ACRONYMS_S2:
-            match = re.search(re.escape(term), clean_search_content_lower, re.IGNORECASE)
+            match = re.search(re.escape(term), search_content_lower_s2, re.IGNORECASE)
             if match:
                 is_relevant = True
-                reason = f"Contexto ('{term}'): {_get_context(clean_search_content_lower, match)}"
+                reason = f"Contexto ('{term}'): {_get_context(search_text_clean_s2, match)}"
                 break
         
         if not is_relevant:
-            # Lógica de nomes S2 com CONTEXTO
+            # Lógica de nomes S2 com CONTEXTO (busca no texto limpo S2)
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
-                for match in re.finditer(name_lower, clean_search_content_lower):
+                for match in re.finditer(name_lower, search_content_lower_s2):
                     start_pos = max(0, match.start() - 150)
-                    context_window_text = clean_search_content_lower[start_pos:match.start()]
+                    context_window_text = search_content_lower_s2[start_pos:match.start()]
                     
                     if any(verb in context_window_text for verb in PERSONNEL_ACTION_VERBS):
                         is_relevant = True
-                        # Pega a janela de contexto + o nome
-                        full_context_text = clean_search_content_lower[start_pos:match.end()]
+                        full_context_text = search_text_clean_s2[start_pos:match.end()]
                         reason = f"Contexto ('{name}'): \"...{norm(full_context_text)}...\""
                         break
                 if is_relevant:
@@ -254,12 +262,12 @@ def process_grouped_materia(
     found_custom_kw = None
     custom_reason = None
     if custom_keywords:
+        # Busca por keywords customizadas no texto S1 (mais genérico)
         for kw in custom_keywords:
-            # Usa search_content_lower (texto completo) para keywords customizadas
-            match = re.search(re.escape(kw), search_content_lower, re.IGNORECASE)
+            match = re.search(re.escape(kw), search_content_lower_s1, re.IGNORECASE)
             if match:
                 found_custom_kw = kw
-                custom_reason = f"Contexto (Personalizada: '{kw}'): {_get_context(search_content_lower, match)}"
+                custom_reason = f"Contexto (Personalizada: '{kw}'): {_get_context(search_text_clean_s1, match)}"
                 break
     
     if found_custom_kw:
@@ -328,16 +336,14 @@ async def processar_inlabs(
 ):
     secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
     
-    # Processa as keywords customizadas
     custom_keywords = []
     if keywords_json:
         try:
-            # Tenta carregar o JSON (que deve ser uma lista de strings)
             keywords_list = json.loads(keywords_json)
             if isinstance(keywords_list, list):
                 custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
         except json.JSONDecodeError:
-            pass # Ignora keywords mal formatadas
+            pass 
     
     client = await inlabs_login_and_get_session()
     try:
@@ -375,13 +381,13 @@ async def processar_inlabs(
                 publication = process_grouped_materia(
                     content['main_article'], 
                     content['full_text'],
-                    custom_keywords # Passa as keywords para o processador
+                    custom_keywords 
                 )
                 if publication:
                     pubs.append(publication)
         
         seen: Set[str] = set()
-        merged: List[Publicoacao] = []
+        merged: List[Publicacao] = []
         for p in pubs:
             key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
             if key not in seen:
