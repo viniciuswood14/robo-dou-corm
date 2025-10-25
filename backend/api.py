@@ -10,30 +10,42 @@ import httpx
 from bs4 import BeautifulSoup
 
 # #####################################################################
-# ########## VERSÃO 12.3 - EXTRATOR DE TABELA DEFINITIVO ##########
+# ########## VERSÃO 12.4 - CONFIG EXTERNA E KEYWORDS ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.3 Extrator Definitivo")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v12.4 Config Externa")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# ====== CONFIG E KEYWORDS ======
-INLABS_BASE = os.getenv("INLABS_BASE", "https://inlabs.in.gov.br")
-INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", f"{INLABS_BASE}/login")
+# ====== CONFIG E KEYWORDS (CARREGADOS DO config.json) ======
+try:
+    with open("config.json", "r", encoding="utf-8") as f:
+        config = json.load(f)
+except FileNotFoundError:
+    raise RuntimeError("Erro: Arquivo 'config.json' não encontrado.")
+except json.JSONDecodeError:
+    raise RuntimeError("Erro: Falha ao decodificar 'config.json'. Verifique a sintaxe.")
+
+INLABS_BASE = os.getenv("INLABS_BASE", config.get("INLABS_BASE", "https://inlabs.in.gov.br"))
+INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", config.get("INLABS_LOGIN_URL", f"{INLABS_BASE}/login"))
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
-TEMPLATE_LME = """Ato de Alteração de Limite de Movimentação com impacto na Defesa/Marinha. Recomenda-se análise para detalhar os valores abaixo:\n\nAmpliação de LME - (RPX): \nAté SET: R$ XXX\nAté NOV: R$ XXX\nAté DEZ: R$ XXX"""
-TEMPLATE_FONTE = """Ato de Modificação de Fontes com impacto na Defesa/Marinha. Recomenda-se análise para detalhar os valores abaixo:\n\nSuplementação (valor total):\nAO | Descrição | Fonte de Recurso | Valor\n\nCancelamento (valor total):\nAO | Descrição | Fonte de Recurso | Valor"""
-TEMPLATE_CREDITO = """Ato de Crédito Suplementar com impacto na Defesa/Marinha. Recomenda-se análise para detalhar os valores abaixo:\n\nSuplementação (valor total):\nAO | Descrição | Valor\n\nCancelamento (valor total):\nAO | Descrição | Valor"""
-ANNOTATION_POSITIVE_GENERIC = "Há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
-ANNOTATION_NEGATIVE = "Não há menção específica ou impacto direto identificado para a Marinha do Brasil, o Comando da Marinha, o Fundo Naval ou o Fundo do Desenvolvimento do Ensino Profissional Marítimo nas partes da publicação analisadas."
-MPO_NAVY_TAGS = {"52131": "Comando da Marinha", "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar", "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM", "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL", "52931": "Fundo Naval", "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo", "52000": "Ministério da Defesa"}
-KEYWORDS_DIRECT_INTEREST_S1 = ["ministério da defesa", "forças armadas", "autoridade marítima", "comando da marinha", "marinha do brasil", "fundo naval", "amazônia azul tecnologias de defesa", "caixa de construções de casas para o pessoal da marinha", "empresa gerencial de projetos navais", "fundo de desenvolvimento do ensino profissional marítimo", "programa nuclear brasileiro"]
-BUDGET_KEYWORDS_S1 = ["crédito suplementar", "crédito extraordinário", "execução orçamentária", "lei orçamentária", "orçamentos fiscal", "reforço de dotações", "programação orçamentária e financeira", "altera grupos de natureza de despesa", "limites de movimentação", "limites de pagamento", "fontes de recursos", "movimentação e empenho", "classificação orçamentária", "gestão fiscal"]
-MPO_ORG_STRING = "ministério do planejamento e orçamento"
-PERSONNEL_ACTION_VERBS = ["nomear", "designar", "exonerar", "dispensar", "promover", "promovido", "agregar", "autoriza o afastamento", "autorizar o afastamento", "viagem", "substituto", "conceder aposentadoria", "passar para a inatividade", "transferir para a reserva"]
-NAMES_TO_TRACK = sorted(list(set(["CLAYTON LUIZ MONTES", "ANTONIO CARLOS FRISSO JÚNIOR", "MICHELLE FEVERSANI PROLO", "MYCHELLE CELESTE RABELO DE SÁ", "GERMANO SANTANA DE FREITAS", "FÁBIO PIFANO PONTES", "SERGIO PINHEIRO FIRPO", "UGO CARNEIRO CURADO", "ALEX FRAGA", "PABLO DA NÓBREGA", "JORGE LUIZ MARONI DIAS", "ADRIANA RIBEIRO MARQUES", "ALEXANDRE AUGUSTO MENDES HATADANI", "FERNANDA COSTA BERNARDES LOUZADA", "MARCOS BARBOSA PINTO", "THALITA FERREIRA DE OLIVEIRA", "CINARA DIAS CUSTÓDIO", "KELLY MIYUKI OSHIRO", "BRUNO MORETTI", "EULER ALBERGARIA DE MELO", "RODRIGO RODRIGUES DA FONSECA", "ROBERTO RAMOS COLLETTI", "PATRICK DE FARIA E SILVA", "DÉBORA RAQUEL CRUZ FERREIRA", "ELISA VIEIRA LEONEL", "RICARDO LEE NAMBA", "FABIO HENRIQUE BITTES TERRA", "BRUNO CIRILO MENDONÇA DE CAMPOS", "CHARLES CARVALHO GUEDES", "VIVIANE APARECIDA DA SILVA VARGA", "MARCELO PEREIRA DE AMORIM", "PAULO JOSÉ DOS REIS SOUZA", "MIGUEL RAGONE DE MATOS", "MARCELO MARTINS PIMENTEL", "JOSÉ ROBERTO DE MORAES REGO PAIVA FERNANDES JÚNIOR", "JOSÉ FERNANDES PONTES JUNIOR", "WALTER COSTA SANTOS", "GILSON ALVES DE ALMEIDA JÚNIOR", "GUILHERME LOURO BRAGA", "AUGUSTO CÉSAR DE CARVALHO FONSECA", "CINARA WAGNER FREDO", "MAX RODRIGO TOMAZ DE AQUINO ELIAS", "ANDRÉ GUIMARÃES RESENDE MARTINS DO VALLE", "BRUNO CORREIA CARDOSO", "OSWALDO GOMES DOS REIS JUNIOR", "FRANSELMO ARAÚJO COSTA", "JOSÉ LOPES FERNANDES", "MARCELO ARANTES GUEDON", "HERALDO LUIZ RODRIGUES", "JULIANA RIBEIRO LARENAS", "MAURÍCIO DE SOUZA BEZERRA", "IDERVÂNIO DA SILVA COSTA", "VIRGINIE HURST", "UALLACE MOREIRA LIMA", "LUIS FELIPE GIESTEIRA", "ROMILSON VOLOTÃO", "RAQUEL BARBOSA DE ALBUQUERQUE", "ANALIZE LENZI RUAS DE ALMEIDA", "FABÍOLA INEZ GUEDES DE CASTRO SALDANHA", "SUELY DIB DE SOUZA E SILVA", "ANA LUCIA GATTO DE OLIVEIRA", "ANA RACHEL FREITAS", "FABIANI FADEL BORIN", "DARCIO GUEDES JUNIOR", "MÁRIO LUÍS GURGEL DE SOUZA", "ELONI CARLOS MARIANI", "BRUNO CÉSAR GROSSI DE SOUZA", "KLEBER PAULINO DE SOUZA", "FERNANDO QUEIROZ", "FLAVIO GESCA VERISSIMO DE PAULA", "PAULO ALVARENGA", "MARIANA CUNHA ELEUTÉRIO RODRIGUES", "FABIANA MATSUO NOMURA", "VIVIANE VECCHI MENDES MULLER", "ARTUR OLAVO FERREIRA", "ALEXANDRINO MACHADO NETO", "ALEXANDRE RODRIGUES VIVEIROS", "LEONARDO DIAS DE ASSUMPÇÃO", "GUSTAVO PEREIRA PINTO", "ALEXANDRE AUGUSTO LOPES VILLELA DE MORAES", "ALEXANDRE DE MELLO BRAGA", "VICTOR LEAL DOMINGUES", "RICARDO YUKIO IAMAGUCHI", "MARCELLO NOGUEIRA CANUTO", "MARCO ALEXANDRE RODRIGUES DE AGUIAR", "MARCOS SAMPAIO OLSEN", "RENATO RODRIGUES DE AGUIAR FREIRE", "LEONARDO PUNTEL", "CELSO LUIZ NAZARETH", "CLÁUDIO PORTUGAL DE VIVEIROS", "ANDRÉ LUIZ SILVA LIMA DE SANTANA MENDES", "CLAUDIO HENRIQUE MELLO DE ALMEIDA", "EDUARDO MACHADO VAZQUEZ", "EDGAR LUIZ SIQUEIRA BARBOSA", "ALEXANDRE RABELLO DE FARIA", "SÍLVIO LUÍS DOS SANTOS", "ARTHUR FERNANDO BETTEGA CORRÊA", "RENATO GARCIA ARRUDA", "CARLOS CHAGAS VIANNA BRAGA", "GUILHERME DA SILVA COSTA", "PAULO CÉSAR BITTENCOURT FERREIRA", "ANDRÉ LUIZ DE ANDRADE FELIX", "JOSÉ ACHILLES ABREU JORGE TEIXEIRA", "ANDRÉ MORAES FERREIRA", "MARCELO MENEZES CARDOSO", "THADEU MARCOS OROSCO COELHO LOBO", "ANTONIO CARLOS CAMBRA", "ALEXANDER REIS LEITE", "AUGUSTO JOSÉ DA SILVA FONSECA JUNIOR", "ROGERIO PINTO FERREIRA RODRIGUES", "MARCO ANTONIO ISMAEL TROVÃO DE OLIVEIRA", "JOÃO ALBERTO DE ARAUJO LAMPERT", "GUSTAVO CALERO GARRIGA PIRES", "MARCO ANTÔNIO LINHARES SOARES", "CARLOS ANDRÉ CORONHA MACEDO", "CARLOS HENRIQUE DE LIMA ZAMPIERI", "ADRIANO MARCELINO BATISTA", "JOSÉ CLÁUDIO OLIVEIRA MACEDO", "JOSÉ VICENTE DE ALVARENGA FILHO", "MANOEL LUIZ PAVÃO BARROSO", "IUNIS TÁVORA SAID", "MARCELO DA SILVA GOMES", "PEDRO AUGUSTO BITTENCOURT HEINE FILHO", "JORGE JOSÉ DE MORAES RULFF", "MARCELO REIS DA SILVA", "RICARDO JAQUES FERREIRA", "FRANCISCO ANDRÉ BARROS CONDE", "VAGNER BELARMINO DE OLIVEIRA", "ALEXANDRE BESSA DE OLIVEIRA", "ALEXANDRE ITIRO VILLELA ASSANO", "ALEXANDRE TAUMATURGO PAVONI", "ANTONIO BRAZ DE SOUZA", "ALEXANDRE VERAS VASCONCELOS", "SÉRGIO BLANCO OZÓRIO", "HUMBERTO LUIS RIBEIRO BASTOS CARMO", "ALEXANDRE AMENDOEIRA NUNES", "NEYDER CAMILLO DE BARROS", "EMERSON AUGUSTO SERAFIM", "GIOVANI CORRÊA", "RICARDO LHAMAS GUASTINI", "GUSTAVO LEITE CYPRIANO NEVES", "MAURICIO BARATA SOARES COELHO RANGEL", "JOÃO CANDIDO MARQUES DIAS", "JOÃO BATISTA BARBOSA", "CARLOS MARCELO FERNANDES CONSIDERA", "DINO AVILA BUSSO", "HÉLIO MOREIRA BRANCO JUNIOR", "LEANDRO FERRONE DEMÉTRIO DE SOUZA", "FERNANDO DE LUCA MARQUES DE OLIVEIRA", "PAULO MAX VILLAS DA SILVA", "JOSÉ CARLOS DE SOUZA JUNIOR", "MARCELO DO NASCIMENTO MARCELINO", "ANDRÉ GUSTAVO SILVEIRA GUIMARÃES", "ALVARO VALENTIM LEMOS", "WASHINGTON LUIZ DE PAULA SANTOS", "PAULO ROBERTO BLANCO OZORIO", "ROBLEDO DE LEMOS COSTA E SÁ", "MARCELO LANCELLOTTI", "SÉRGIO TADEU LEÃO ROSÁRIO", "ANDRÉ RICARDO ARAUJO SILVA", "LEONARDO PACHECO VIANNA", "CARLOS ALEXANDRE ALVES BORGES DIAS", "ANDERSON MARCOS ALVES DA SILVA", "LEONARDO CAVALCANTI DE SOUZA LIMA", "LEONARDO BRAGA MARTINS", "ANDRÉ LUIZ GONÇALVES RIBEIRO", "ANDRÉ BASTOS SILVA", "ANDRÉ LUIZ SANTOS DA SILVA", "ALCIDES ROBERTO NUNES", "MARCELO BRASIL CARVALHO DA FONSECA", "EDUARDO QUESADO FILGUEIRAS"])), key=str.lower)
-TERMS_AND_ACRONYMS_S2 = ["VAlte (IM)", "CAlte (IM)", "CMG (IM)", "CF (IM)", "CC (IM)", "CT (IM)", "1T (IM)", "2T (IM)"]
+
+# Carrega constantes do JSON
+TEMPLATE_LME = config.get("TEMPLATE_LME", "")
+TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
+TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
+ANNOTATION_POSITIVE_GENERIC = config.get("ANNOTATION_POSITIVE_GENERIC", "")
+ANNOTATION_NEGATIVE = config.get("ANNOTATION_NEGATIVE", "")
+MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})
+KEYWORDS_DIRECT_INTEREST_S1 = config.get("KEYWORDS_DIRECT_INTEREST_S1", [])
+BUDGET_KEYWORDS_S1 = config.get("BUDGET_KEYWORDS_S1", [])
+MPO_ORG_STRING = config.get("MPO_ORG_STRING", "ministério do planejamento e orçamento")
+PERSONNEL_ACTION_VERBS = config.get("PERSONNEL_ACTION_VERBS", [])
+TERMS_AND_ACRONYMS_S2 = config.get("TERMS_AND_ACRONYMS_S2", [])
+NAMES_TO_TRACK = sorted(list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower)
+# ==========================================================
+
 
 class Publicacao(BaseModel):
     organ: Optional[str] = None; type: Optional[str] = None; summary: Optional[str] = None
@@ -149,7 +161,12 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             
     return "\n".join(output_lines)
 
-def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str) -> Optional[Publicacao]:
+def process_grouped_materia(
+    main_article: BeautifulSoup, 
+    full_text_content: str,
+    custom_keywords: List[str]
+) -> Optional[Publicacao]:
+    
     organ = norm(main_article.get('artCategory', ''))
     section = main_article.get('pubName', '').upper()
     body = main_article.find('body')
@@ -217,6 +234,24 @@ def process_grouped_materia(main_article: BeautifulSoup, full_text_content: str)
                         break
                 if is_relevant:
                     break
+    
+    # Lógica de Palavra-Chave Personalizada (roda para todas as seções)
+    found_custom_kw = None
+    if custom_keywords:
+        for kw in custom_keywords:
+            if kw in search_content_lower:
+                found_custom_kw = kw
+                break
+    
+    if found_custom_kw:
+        is_relevant = True # Garante que seja relevante
+        custom_reason = f"Há menção à palavra-chave personalizada: '{found_custom_kw}'."
+        if reason and reason != ANNOTATION_NEGATIVE:
+            # Se já tinha um motivo (ex: MPO), anexa
+            reason = f"{reason}\n⚓ {custom_reason}"
+        elif not reason or reason == ANNOTATION_NEGATIVE:
+            # Se não tinha motivo, ou o motivo era "negativo", substitui
+            reason = custom_reason
 
     if is_relevant:
         return Publicacao(
@@ -271,11 +306,20 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
 async def processar_inlabs(
     data: str = Form(..., description="YYYY-MM-DD"),
     sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
-    keywords_json: Optional[str] = Form(None)
+    keywords_json: Optional[str] = Form(None, description="Um JSON string de uma lista de keywords. Ex: '[\"amazul\", \"prosub\"]'")
 ):
     secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
+    
+    # Processa as keywords customizadas
+    custom_keywords = []
     if keywords_json:
-        raise HTTPException(status_code=400, detail="Customização de keywords desativada em favor da lógica inteligente.")
+        try:
+            # Tenta carregar o JSON (que deve ser uma lista de strings)
+            keywords_list = json.loads(keywords_json)
+            if isinstance(keywords_list, list):
+                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except json.JSONDecodeError:
+            pass # Ignora keywords mal formatadas
     
     client = await inlabs_login_and_get_session()
     try:
@@ -310,7 +354,11 @@ async def processar_inlabs(
         pubs: List[Publicacao] = []
         for materia_id, content in materias.items():
             if content['main_article']:
-                publication = process_grouped_materia(content['main_article'], content['full_text'])
+                publication = process_grouped_materia(
+                    content['main_article'], 
+                    content['full_text'],
+                    custom_keywords # Passa as keywords para o processador
+                )
                 if publication:
                     pubs.append(publication)
         
