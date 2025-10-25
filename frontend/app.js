@@ -15,6 +15,7 @@ const preview = el("preview");
 btnProcessar.addEventListener("click", async () => {
   const data = el("data").value.trim();
   const sections = el("sections").value.trim() || "DO1,DO2";
+  const keywords = el("keywords").value.trim(); // CAMPO ADICIONADO
 
   if (!data) {
     preview.textContent = "Informe a data (YYYY-MM-DD).";
@@ -25,7 +26,17 @@ btnProcessar.addEventListener("click", async () => {
   fd.append("data", data);
   fd.append("sections", sections);
   
-  // Lógica de "source" removida
+  // LÓGICA DE KEYWORDS ADICIONADA
+  if (keywords) {
+    // O backend espera um JSON stringificado de uma lista de strings
+    const keywordsList = keywords.split(',')
+      .map(k => k.trim()) // Limpa espaços
+      .filter(k => k.length > 0); // Remove vazios
+      
+    if (keywordsList.length > 0) {
+      fd.append("keywords_json", JSON.stringify(keywordsList));
+    }
+  }
 
   btnProcessar.disabled = true;
   btnCopiar.disabled = true;
