@@ -14,8 +14,7 @@ const preview = el("preview");
 
 btnProcessar.addEventListener("click", async () => {
   const data = el("data").value.trim();
-  const sections = el("sections").value.trim() || "DO1";
-  const selectedSource = document.querySelector('input[name="source"]:checked').value;
+  const sections = el("sections").value.trim() || "DO1,DO2";
 
   if (!data) {
     preview.textContent = "Informe a data (YYYY-MM-DD).";
@@ -25,15 +24,17 @@ btnProcessar.addEventListener("click", async () => {
   const fd = new FormData();
   fd.append("data", data);
   fd.append("sections", sections);
-  fd.append("source", selectedSource); // Envia a fonte selecionada
+  
+  // Lógica de "source" removida
 
   btnProcessar.disabled = true;
   btnCopiar.disabled = true;
   preview.classList.add("loading");
-  preview.textContent = `Processando via ${selectedSource}, aguarde…`;
+  preview.textContent = "Processando no INLABS, aguarde…";
 
   try {
-    const res = await fetch(`${API_BASE}/processar`, { method: "POST", body: fd }); // Nova rota /processar
+    // URL corrigida para a rota original e única
+    const res = await fetch(`${API_BASE}/processar-inlabs`, { method: "POST", body: fd }); 
     const body = await res.json().catch(() => ({}));
 
     if (!res.ok) {
@@ -53,8 +54,6 @@ btnProcessar.addEventListener("click", async () => {
     preview.classList.remove("loading");
   }
 });
-
-// ... (função de copiar inalterada) ...
 
 btnCopiar.addEventListener("click", async () => {
   try {
