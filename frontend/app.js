@@ -1,4 +1,3 @@
-// ABRIR O BLOCO DE CÓDIGO AQUI
 document.addEventListener("DOMContentLoaded", function() {
 
   // 👉 Troque para a URL do seu backend no Render:
@@ -6,14 +5,16 @@ document.addEventListener("DOMContentLoaded", function() {
 
   const el = (id) => document.getElementById(id);
   const btnProcessar = el("btnProcessar");
-  const btnProcessarIA = el("btnProcessarIA"); // Novo botão
+  const btnProcessarIA = el("btnProcessarIA");
   const btnCopiar = el("btnCopiar");
   const preview = el("preview");
 
   // Valor padrão: hoje
   (function initDate() {
     const today = new Date().toISOString().slice(0, 10);
-    el("data").value = today;
+    if (el("data")) {
+      el("data").value = today;
+    }
   })();
 
   // Função central de processamento
@@ -23,7 +24,7 @@ document.addEventListener("DOMContentLoaded", function() {
     const keywords = el("keywords").value.trim();
 
     if (!data) {
-      preview.textContent = "Informe a data (YYYY-MM-DD).";
+      if(preview) preview.textContent = "Informe a data (YYYY-MM-DD).";
       return;
     }
 
@@ -41,16 +42,20 @@ document.addEventListener("DOMContentLoaded", function() {
       }
     }
 
-    // Desabilita todos os botões
-    btnProcessar.disabled = true;
-    btnProcessarIA.disabled = true;
-    btnCopiar.disabled = true;
-    preview.classList.add("loading");
-    
-    if (endpoint.includes("-ia")) {
-      preview.textContent = "Processando com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
-    } else {
-      preview.textContent = "Processando (Rápido) no INLABS, aguarde…";
+    // --- CORREÇÃO v13.5 ---
+    // Adiciona verificação antes de desabilitar
+    if (btnProcessar) btnProcessar.disabled = true;
+    if (btnProcessarIA) btnProcessarIA.disabled = true;
+    if (btnCopiar) btnCopiar.disabled = true;
+    // ---------------------
+
+    if (preview) {
+      preview.classList.add("loading");
+      if (endpoint.includes("-ia")) {
+        preview.textContent = "Processando com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
+      } else {
+        preview.textContent = "Processando (Rápido) no INLABS, aguarde…";
+      }
     }
 
     try {
@@ -58,28 +63,36 @@ document.addEventListener("DOMContentLoaded", function() {
       const body = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        preview.textContent = body?.detail
+        if(preview) preview.textContent = body?.detail
           ? `Erro: ${body.detail}`
           : `Erro HTTP ${res.status}`;
         return;
       }
 
       const texto = body?.whatsapp_text || "(Sem resultados)";
-      preview.textContent = texto;
-      btnCopiar.disabled = !texto || texto === "(Sem resultados)";
+      if (preview) preview.textContent = texto;
+
+      // --- CORREÇÃO v13.5 ---
+      // Adiciona verificação antes de habilitar/desabilitar
+      if (btnCopiar) {
+        btnCopiar.disabled = !texto || texto === "(Sem resultados)";
+      }
+      // ---------------------
+
     } catch (err) {
-      preview.textContent = `Falha na requisição: ${err.message || err}`;
+      if (preview) preview.textContent = `Falha na requisição: ${err.message || err}`;
     } finally {
-      // Reabilita os botões
-      btnProcessar.disabled = false;
-      btnProcessarIA.disabled = false;
-      preview.classList.remove("loading");
+      
+      // --- CORREÇÃO v13.5 ---
+      // Adiciona verificação antes de re-habilitar
+      if (btnProcessar) btnProcessar.disabled = false;
+      if (btnProcessarIA) btnProcessarIA.disabled = false;
+      if (preview) preview.classList.remove("loading");
+      // ---------------------
     }
   }
 
   // Listeners dos botões
-  // Se qualquer um desses botões for 'null', o addEventListener agora
-  // só vai rodar depois que a página carregar, evitando o erro.
   if (btnProcessar) {
     btnProcessar.addEventListener("click", () => handleProcessing("/processar-inlabs"));
   }
@@ -100,5 +113,4 @@ document.addEventListener("DOMContentLoaded", function() {
     });
   }
 
-// FECHAR O BLOCO DE CÓDIGO AQUI
 });
