@@ -409,7 +409,7 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> Opti
     """Chama a API do Gemini. Retorna análise, erro leve ou None se bloqueado."""
     try:
         # Constrói o prompt final
-        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:10000]}" # Limita a 10k caracteres por segurança
+        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:99999999999999999999999999]}" # Limita a 10k caracteres por segurança
         
         # --- ALTERAÇÃO v13.9 ---
         # Faz a chamada assíncrona SEM safety_settings e generation_config
