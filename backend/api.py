@@ -229,4 +229,122 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]: # ... (código inalte
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
             if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
+    return xml_blobs
+# --- Fim das Funções de Rede ---
 
+# === ENDPOINT RÁPIDO (v12.7) ===
+@app.post("/processar-inlabs", response_model=ProcessResponse)
+async def processar_inlabs(# ... (código inalterado) ...
+    data: str = Form(..., description="YYYY-MM-DD"), sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"), keywords_json: Optional[str] = Form(None) ):
+    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]; custom_keywords = []
+    if keywords_json:
+        try: keywords_list = json.loads(keywords_json);
+        if isinstance(keywords_list, list): custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except json.JSONDecodeError: pass 
+    client = await inlabs_login_and_get_session()
+    try:
+        listing_url = await resolve_date_url(client, data); html = await fetch_listing_html(client, data); zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+        if not zip_links: raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
+        all_xml_blobs = [];
+        for zurl in zip_links: zb = await download_zip(client, zurl); all_xml_blobs.extend(extract_xml_from_zip(zb))
+        materias: Dict[str, Dict] = {}
+        for blob in all_xml_blobs:
+            try: soup = BeautifulSoup(blob, 'lxml-xml'); article = soup.find('article');
+            if not article: continue; materia_id = article.get('idMateria'); 
+            if not materia_id: continue;
+            if materia_id not in materias: materias[materia_id] = {'main_article': None, 'full_text': ''}
+            materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"; body = article.find('body')
+            if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True): materias[materia_id]['main_article'] = article
+            except Exception: continue
+        pubs: List[Publicacao] = [];
+        for materia_id, content in materias.items():
+            if content['main_article']: publication = process_grouped_materia(content['main_article'], content['full_text'], custom_keywords );
+            if publication: pubs.append(publication)
+        seen: Set[str] = set(); merged: List[Publicacao] = []
+        for p in pubs: key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100];
+        if key not in seen: seen.add(key); merged.append(p)
+        texto = monta_whatsapp(merged, data); return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
+    finally: await client.aclose()
+
+# --- Função de Análise de IA (Estágio 2 - v13.9) ---
+async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> Optional[str]: # ... (código inalterado) ...
+    try: prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:10000]}"; response = await model.generate_content_async(prompt) # Chamada Simplificada
+    try: analysis = norm(response.text);
+    if analysis: return analysis
+    else: try: finish_reason = response.prompt_feedback.finish_reason.name
+    except Exception: finish_reason = "desconhecido"; print(f"Resposta da IA vazia. Razão: {finish_reason}"); return None # Fallback
+    except ValueError as e: print(f"Bloco de IA (ValueError): {e}"); return None # Fallback
+    except Exception as e_inner: print(f"Erro inesperado ao processar resposta da IA: {e_inner}"); return f"Erro processando resposta IA: {str(e_inner)[:50]}" # Erro leve
+    except Exception as e: print(f"Erro na API do Gemini: {e}"); error_msg = str(e).lower();
+    if "quota" in error_msg: return "Erro na análise de IA: Cota de uso da API excedida.";
+    if "api_key" in error_msg: return "Erro na análise de IA: Chave de API inválida.";
+    return f"Erro na análise de IA: {str(e)[:100]}" # Erro específico
+# ------------------------------------------------
+
+# === ENDPOINT INTELIGENTE (IA - v13.11) ===
+@app.post("/processar-inlabs-ia", response_model=ProcessResponse)
+async def processar_inlabs_ia( # ... (código inalterado, exceto nome do modelo) ...
+    data: str = Form(..., description="YYYY-MM-DD"), sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"), keywords_json: Optional[str] = Form(None)):
+    if not GEMINI_API_KEY: raise HTTPException(status_code=500, detail="A variável de ambiente GEMINI_API_KEY não foi configurada no servidor.")
+    try: model_name = "gemini-2.5-pro"; print(f"Inicializando modelo de IA: {model_name}"); model = genai.GenerativeModel(model_name) 
+    except Exception as e: raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA '{model_name}': {e}")
+    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]; custom_keywords = []
+    if keywords_json:
+        try: keywords_list = json.loads(keywords_json);
+        if isinstance(keywords_list, list): custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except json.JSONDecodeError: pass 
+    client = await inlabs_login_and_get_session(); pubs_filtradas: List[Publicacao] = [] 
+    try:
+        listing_url = await resolve_date_url(client, data); html = await fetch_listing_html(client, data); zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+        if not zip_links: raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
+        all_xml_blobs = [];
+        for zurl in zip_links: zb = await download_zip(client, zurl); all_xml_blobs.extend(extract_xml_from_zip(zb))
+        materias: Dict[str, Dict] = {}
+        for blob in all_xml_blobs:
+            try: soup = BeautifulSoup(blob, 'lxml-xml'); article = soup.find('article');
+            if not article: continue; materia_id = article.get('idMateria'); 
+            if not materia_id: continue;
+            if materia_id not in materias: materias[materia_id] = {'main_article': None, 'full_text': ''}
+            materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"; body = article.find('body')
+            if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True): materias[materia_id]['main_article'] = article
+            except Exception: continue
+        for materia_id, content in materias.items():
+            if content['main_article']: publication = process_grouped_materia(content['main_article'], content['full_text'], custom_keywords );
+            if publication: pubs_filtradas.append(publication)
+        seen: Set[str] = set(); merged_pubs: List[Publicacao] = []
+        for p in pubs_filtradas: key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100];
+        if key not in seen: seen.add(key); merged_pubs.append(p)
+        tasks = [];
+        for p in merged_pubs:
+            if p.clean_text: tasks.append(get_ai_analysis(p.clean_text, model))
+        ai_results = await asyncio.gather(*tasks, return_exceptions=True); pubs_finais: List[Publicacao] = []
+        for i, p in enumerate(merged_pubs):
+            if i < len(ai_results):
+                ai_reason_result = ai_results[i]
+                if isinstance(ai_reason_result, Exception): p.relevance_reason = f"Erro GRAVE na análise de IA: {ai_reason_result}"; pubs_finais.append(p)
+                elif ai_reason_result is None: pubs_finais.append(p) # Fallback
+                elif isinstance(ai_reason_result, str) and ai_reason_result.startswith("Erro na análise de IA:"): p.relevance_reason = ai_reason_result; pubs_finais.append(p) # Erro Leve
+                elif isinstance(ai_reason_result, str) and "sem impacto direto" not in ai_reason_result.lower(): p.relevance_reason = ai_reason_result; pubs_finais.append(p) # Sucesso
+        texto = monta_whatsapp(pubs_finais, data); return ProcessResponse(date=data, count=len(pubs_finais), publications=pubs_finais, whatsapp_text=texto)
+    finally: await client.aclose()
+
+# --- Endpoint de Teste (v13.11) ---
+@app.get("/test-ia")
+async def test_ia_endpoint(): # ... (código inalterado, exceto nome do modelo) ...
+    if not GEMINI_API_KEY: raise HTTPException(status_code=500, detail="GEMINI_API_KEY não configurada.")
+    try: model_name = "gemini-2.5-pro"; print(f"Inicializando modelo de teste: {model_name}"); model = genai.GenerativeModel(model_name) 
+    except Exception as e: raise HTTPException(status_code=500, detail=f"Falha ao inicializar modelo '{model_name}': {e}")
+    test_prompt = "Qual a capital do Brasil?"
+    print(f"Enviando prompt de teste: '{test_prompt}'")
+    try:
+        response = await model.generate_content_async(test_prompt) # Chamada simplificada
+        try: analysis = norm(response.text);
+        if analysis: print(f"Teste OK! Resposta: {analysis}"); return {"result": f"Teste OK! Resposta da IA: '{analysis}'"}
+        else: print("Teste FALHOU. Resposta vazia."); return {"result": "Teste FALHOU. Resposta vazia da IA."}
+        except ValueError as e: print(f"Teste FALHOU (ValueError): {e}"); return {"result": f"Teste FALHOU. A IA foi bloqueada (ValueError): {e}"}
+        except Exception as e_inner: print(f"Teste FALHOU (Erro Processando): {e_inner}"); return {"result": f"Teste FALHOU. Erro processando resposta IA: {str(e_inner)[:50]}"}
+    except Exception as e:
+        print(f"Teste FALHOU (Erro API): {e}"); error_msg = str(e).lower(); detail = str(e)[:100]
+        if "quota" in error_msg: detail = "Cota de uso da API excedida."; elif "api_key" in error_msg: detail = "Chave de API inválida.";
+        raise HTTPException(status_code=500, detail=f"Teste FALHOU. Erro na chamada da API: {detail}")
+# === FIM DO ENDPOINT DE TESTE ===
