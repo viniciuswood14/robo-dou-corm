@@ -513,7 +513,7 @@ async def processar_inlabs_ia(
         
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-# 5. Monta o resultado final (Lógica MODIFICADA para incluir 'Sem impacto direto')
+        # 5. Monta o resultado final (Lógica MODIFICADA para incluir 'Sem impacto direto')
         pubs_finais: List[Publicacao] = []
         for i, p in enumerate(merged_pubs):
             if i < len(ai_results):
@@ -554,6 +554,12 @@ async def processar_inlabs_ia(
             else:
                 # Caso raro: não houve resultado da IA para esta publicação
                 pubs_finais.append(p)
+        
+        texto = monta_whatsapp(pubs_finais, data)
+        return ProcessResponse(date=data, count=len(pubs_finais), publications=pubs_finais, whatsapp_text=texto)
+    
+    finally:
+        await client.aclose()
 
 
 # --- Endpoint de Teste (v13.9 - Simplificado) ---
@@ -589,5 +595,3 @@ async def test_ia_endpoint():
         elif "api_key" in error_msg: detail = "Chave de API inválida."
         raise HTTPException(status_code=500, detail=f"Teste FALHOU. Erro na chamada da API: {detail}")
 # === FIM DO ENDPOINT DE TESTE ===
-
-
