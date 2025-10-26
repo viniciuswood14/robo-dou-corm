@@ -548,7 +548,7 @@ async def processar_inlabs_ia(
         seen: Set[str] = set()
         merged_pubs: List[Publicacao] = []
         for p in pubs_filtradas:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" (p.summary or "")[:100]
+            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
             if key not in seen:
                 seen.add(key)
                 merged_pubs.append(p)
