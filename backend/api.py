@@ -64,7 +64,13 @@ Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, 
 Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
 
 Critérios de Análise:
-1.  Se for ato orçamentário (MPO/Fazenda), foque no impacto: É crédito, LME, fontes? Afeta UGs da Marinha (Comando, Fundo Naval, AMAZUL)?
+1.  Se for ato orçamentário (MPO/Fazenda), foque no impacto: É crédito, LME, fontes? Afeta UGs da Marinha ( "52131": "Comando da Marinha",
+    "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
+    "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
+    "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
+    "52931": "Fundo Naval",
+    "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
+    "52000": "Ministério da Defesa")?
 2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
 3.  Se for ato de pessoal (Seção 2), quem é a pessoa e qual a ação (nomeação, exoneração, viagem)?
 4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas citado numa lista de participantes de reunião, ou 'Marinha' em nome de empresa privada), responda APENAS com a frase: "Sem impacto direto."
