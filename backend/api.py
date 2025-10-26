@@ -445,7 +445,7 @@ async def processar_inlabs_ia(
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="A variável de ambiente GEMINI_API_KEY não foi configurada no servidor.")
     try:
-        model = genai.GenerativeModel('gemini-1.0-pro') 
+        model = genai.GenerativeModel('gemini-2.5-pro') 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA: {e}")
 
@@ -552,7 +552,7 @@ async def test_ia_endpoint():
     # ... (código inalterado da v13.8) ...
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY não configurada.")
-    try: model = genai.GenerativeModel('gemini-1.0-pro') 
+    try: model = genai.GenerativeModel('gemini-2.5-pro') 
     except Exception as e: raise HTTPException(status_code=500, detail=f"Falha ao inicializar modelo: {e}")
     test_prompt = "Qual a capital do Brasil?"
     print(f"Enviando prompt de teste: '{test_prompt}'")
