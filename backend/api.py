@@ -182,6 +182,16 @@ def process_grouped_materia(
 ) -> Optional[Publicacao]:
     # ... (código inalterado) ...
     organ = norm(main_article.get('artCategory', ''))
+    organ_lower = organ.lower() # Helper
+
+    # --- INÍCIO DA MODIFICAÇÃO (Exclusão de Órgãos) ---
+    if (
+        "comando da aeronáutica" in organ_lower or
+        "comando do exército" in organ_lower
+    ):
+        return None # Exclui publicações da Aeronáutica e Exército
+    # --- FIM DA MODIFICAÇÃO ---
+
     section = main_article.get('pubName', '').upper()
     body = main_article.find('body')
     if not body: return None
@@ -536,10 +546,20 @@ async def processar_inlabs_ia(
                         p.relevance_reason = ai_reason_result
                         pubs_finais.append(p)
                     
+                    # --- INÍCIO DA MODIFICAÇÃO (Lógica Condicional MPO) ---
                     elif "sem impacto direto" in ai_reason_result.lower():
-                        # [MODIFICADO] IA analisou e disse ser sem impacto, mas queremos manter.
-                        p.relevance_reason = ai_reason_result # Usa a resposta da IA (ex: "Sem impacto direto.")
-                        pubs_finais.append(p)
+                        
+                        # Verifica se a publicação é do MPO
+                        is_mpo_pub = MPO_ORG_STRING in (p.organ or "").lower()
+                        
+                        # Regra 1: Se for MPO, MANTÉM mesmo sem impacto.
+                        if is_mpo_pub:
+                            p.relevance_reason = ai_reason_result # Mantém com a obs da IA
+                            pubs_finais.append(p)
+                        else:
+                            # Regra 2: Se NÃO for MPO e for "sem impacto", DESCARTA.
+                            pass # Não faz o append
+                    # --- FIM DA MODIFICAÇÃO ---
                         
                     else:
                         # IA funcionou e confirmou relevância
