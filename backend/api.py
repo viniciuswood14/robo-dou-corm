@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Set, Dict
+from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
@@ -16,10 +16,10 @@ from google.generativeai.types import GenerationConfig
 # -------------------------------------------
 
 # #####################################################################
-# ########## VERSÃO 13.9 - Chamada IA Simplificada (Produção) ##########
+# ########## VERSÃO 13.9.1 - (IA com MPO Prompt dinâmico) ##############
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.9 (IA)")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.9.1 (IA MPO-Aware)")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -81,10 +81,37 @@ TEXTO DA PUBLICAÇÃO:
 """
 # ---------------------------------
 
+# --- NOVO: Master Prompt para MPO (Alta Responsabilidade) ---
+GEMINI_MPO_PROMPT = """
+Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
+Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo.
+
+ATENÇÃO: Esta publicação do MPO/Fazenda já foi pré-filtrada e CONFIRMADA como de alto impacto para a Marinha do Brasil (MB), pois contém menções diretas a UGs orçamentárias da Marinha (como 52131, 52931, 52000, etc.) em seus anexos.
+
+Sua tarefa NÃO é julgar a relevância, mas sim EXPLICAR O IMPACTO.
+
+Instruções:
+1.  Leia o texto completo, incluindo os anexos.
+2.  Identifique QUAIS Unidades Orçamentárias da Marinha (ou Defesa) são afetadas.
+3.  Resuma a alteração: É um crédito suplementar (acréscimo)? Um cancelamento (redução)? Uma alteração de GND?
+4.  Seja específico. Se possível, cite as Ações Orçamentárias (AO) e os valores.
+5.  Escreva uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp.
+
+Exemplo de Resposta: "Ato do MPO altera GND, suplementando R$ 10,5M para a AO 1234 (GND 3) do Comando da Marinha e cancelando R$ 2,0M da AO 5678 (GND 4) do Fundo Naval."
+
+NÃO RESPONDA "Sem impacto direto." Esta publicação TEM impacto.
+
+TEXTO DA PUBLICAÇÃO:
+"""
+# ---------------------------------
+
+
+# ### MODIFICAÇÃO 1: Adicionado 'is_mpo_navy_hit'
 class Publicacao(BaseModel):
     organ: Optional[str] = None; type: Optional[str] = None; summary: Optional[str] = None
     raw: Optional[str] = None; relevance_reason: Optional[str] = None; section: Optional[str] = None
     clean_text: Optional[str] = None # Campo para guardar texto limpo para a IA
+    is_mpo_navy_hit: bool = False # Flag para S1 avisar S2
 
 class ProcessResponse(BaseModel):
     date: str; count: int; publications: List[Publicacao]; whatsapp_text: str
@@ -116,9 +143,11 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             # Adiciona tratamento para erro no motivo (mostra erro em vermelho no preview)
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
-            if reason.startswith("Erro na análise de IA:") or reason.startswith("Erro GRAVE"):
+            
+            # Ajustado para pegar Erros da IA E o novo Alerta de desobediência
+            if reason.startswith("Erro na análise de IA:") or reason.startswith("Erro GRAVE") or reason.startswith("⚠️"):
                  prefix = "⚠️ Erro IA:" # Muda o prefixo para erros
-                 reason = reason.replace("Erro na análise de IA:", "").replace("Erro GRAVE na análise de IA:", "").strip()
+                 reason = reason.replace("Erro na análise de IA:", "").replace("Erro GRAVE na análise de IA:", "").replace("⚠️ IA ignorou impacto MPO:", "").strip()
 
             if '\n' in reason:
                 lines.append(f"{prefix}\n{reason}")
@@ -142,13 +171,13 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                 current_unidade = row_full_text.replace("UNIDADE:", "").strip()
                 continue 
             if "PROGRAMA DE TRABALHO" in row_full_text:
-                if "ACRÉSCIMO" in row_full_text.upper():
+                if "ACRÉSCIMO" in row_full_text.UPPER():
                     current_operation = "acrescimo"
-                elif "REDUÇÃO" in row_full_text.upper() or "CANCELAMENTO" in row_full_text.upper():
+                elif "REDUÇÃO" in row_full_text.UPPER() or "CANCELAMENTO" in row_full_text.UPPER():
                     current_operation = "reducao"
                 else: current_operation = None
                 continue 
-            if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.upper(): continue
+            if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.UPPER(): continue
             if current_unidade and current_operation and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
                 try:
                     ao, desc, _, _, gnd, _, _, _, _, valor = row_text_cells
@@ -180,7 +209,7 @@ def parse_gnd_change_table(full_text_content: str) -> str:
             output_lines.append(line)
     return "\n".join(output_lines)
 
-# (Função de filtro v12.7 - Esta é o Estágio 1)
+# ### MODIFICAÇÃO 2: process_grouped_materia agora seta a flag 'is_mpo_navy_hit_flag'
 def process_grouped_materia(
     main_article: BeautifulSoup, 
     full_text_content: str, # Este é o XML/HTML bruto
@@ -213,6 +242,7 @@ def process_grouped_materia(
     reason = None
     search_content_lower = norm(full_text_content).lower()
     clean_text_for_ia = "" # Prepara o texto limpo para a IA
+    is_mpo_navy_hit_flag = False # <-- FLAG INICIALIZADA
 
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ.lower()
@@ -220,6 +250,7 @@ def process_grouped_materia(
             found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
             if found_navy_codes:
                 is_relevant = True
+                is_mpo_navy_hit_flag = True # <-- FLAG SETADA
                 summary_lower = summary.lower()
                 if "altera parcialmente grupos de natureza de despesa" in summary_lower:
                     reason = parse_gnd_change_table(full_text_content) 
@@ -287,7 +318,8 @@ def process_grouped_materia(
         return Publicacao(
             organ=organ, type=act_type, summary=summary,
             raw=display_text, relevance_reason=reason, section=section,
-            clean_text=clean_text_for_ia
+            clean_text=clean_text_for_ia,
+            is_mpo_navy_hit=is_mpo_navy_hit_flag # <-- FLAG PASSADA PARA O OBJETO
         )
     return None
 
@@ -410,12 +442,12 @@ async def processar_inlabs(
         await client.aclose()
 
 
-# --- NOVO: Função de Análise de IA (Estágio 2) ---
-async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> Optional[str]:
+# ### MODIFICAÇÃO 3: get_ai_analysis agora aceita 'prompt_template'
+async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel, prompt_template: str = GEMINI_MASTER_PROMPT) -> Optional[str]:
     """Chama a API do Gemini. Retorna análise, erro leve ou None se bloqueado."""
     try:
-        # Constrói o prompt final
-        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text}" # Limita a 10k caracteres por segurança
+        # Constrói o prompt final USANDO O TEMPLATE FORNECIDO
+        prompt = f"{prompt_template}\n\n{clean_text}" 
         
         # --- ALTERAÇÃO v13.9 ---
         # Faz a chamada assíncrona SEM safety_settings e generation_config
@@ -450,7 +482,7 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> Opti
 # ------------------------------------------------
 
 
-# === NOVO: ENDPOINT INTELIGENTE (IA) ===
+# ### MODIFICAÇÃO 4 E 5: Endpoint de IA usa a flag e seleciona o prompt
 @app.post("/processar-inlabs-ia", response_model=ProcessResponse)
 async def processar_inlabs_ia(
     data: str = Form(..., description="YYYY-MM-DD"),
@@ -516,20 +548,32 @@ async def processar_inlabs_ia(
         seen: Set[str] = set()
         merged_pubs: List[Publicacao] = []
         for p in pubs_filtradas:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            key = (p.organ or "") + "||" + (p.type or "") + "||" (p.summary or "")[:100]
             if key not in seen:
                 seen.add(key)
                 merged_pubs.append(p)
         
-        # 4. Executa o ESTÁGIO 2 (Análise com IA)
+        # 4. Executa o ESTÁGIO 2 (Análise com IA) - Lógica MODIFICADA
         tasks = []
         for p in merged_pubs:
+            
+            # --- INÍCIO DA MODIFICAÇÃO 4 ---
+            # Decide qual prompt usar
+            prompt_to_use = GEMINI_MASTER_PROMPT
+            if p.is_mpo_navy_hit:
+                prompt_to_use = GEMINI_MPO_PROMPT # <-- USA O PROMPT ESPECIAL
+            # --- FIM DA MODIFICAÇÃO 4 ---
+                
             if p.clean_text:
-                tasks.append(get_ai_analysis(p.clean_text, model))
+                # Passa o prompt_to_use para a função
+                tasks.append(get_ai_analysis(p.clean_text, model, prompt_to_use))
+            else:
+                # Fallback (raro, mas seguro)
+                tasks.append(get_ai_analysis(p.relevance_reason or "Texto não disponível", model, prompt_to_use))
         
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 5. Monta o resultado final (Lógica MODIFICADA para incluir 'Sem impacto direto')
+        # 5. Monta o resultado final - Lógica MODIFICADA
         pubs_finais: List[Publicacao] = []
         for i, p in enumerate(merged_pubs):
             if i < len(ai_results):
@@ -552,20 +596,24 @@ async def processar_inlabs_ia(
                         p.relevance_reason = ai_reason_result
                         pubs_finais.append(p)
                     
-                    # --- INÍCIO DA MODIFICAÇÃO (Lógica Condicional MPO) ---
+                    # --- INÍCIO DA MODIFICAÇÃO 5 ---
                     elif "sem impacto direto" in ai_reason_result.lower():
                         
-                        # Verifica se a publicação é do MPO
-                        is_mpo_pub = MPO_ORG_STRING in (p.organ or "").lower()
+                        if p.is_mpo_navy_hit:
+                            # A IA desobedeceu o prompt especial!
+                            print(f"ALERTA: IA desobedeceu o MPO_PROMPT para {p.type}. Respondeu 'Sem impacto'.")
+                            p.relevance_reason = f"⚠️ IA ignorou impacto MPO: {ai_reason_result}"
+                            pubs_finais.append(p)
                         
-                        # Regra 1: Se for MPO, MANTÉM mesmo sem impacto.
-                        if is_mpo_pub:
-                            p.relevance_reason = ai_reason_result # Mantém com a obs da IA
+                        elif MPO_ORG_STRING in (p.organ or "").lower():
+                            # É MPO, mas não um 'hit' da marinha (ex: S1 achou 'reforço')
+                            # A IA pode estar certa.
+                            p.relevance_reason = ai_reason_result
                             pubs_finais.append(p)
                         else:
-                            # Regra 2: Se NÃO for MPO e for "sem impacto", DESCARTA.
-                            pass # Não faz o append
-                    # --- FIM DA MODIFICAÇÃO ---
+                            # NÃO é MPO e é "sem impacto", DESCARTA.
+                            pass 
+                    # --- FIM DA MODIFICAÇÃO 5 ---
                         
                     else:
                         # IA funcionou e confirmou relevância
