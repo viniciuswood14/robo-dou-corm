@@ -5,15 +5,21 @@ from typing import List, Optional, Set, Dict
 from datetime import datetime
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
+import asyncio # Importado para o processamento em paralelo da IA
 
 import httpx
 from bs4 import BeautifulSoup
 
+# --- NOVO: Importações da IA ---
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig, SafetySetting, HarmCategory
+# -----------------------------
+
 # #####################################################################
-# ########## VERSÃO 12.6 - LIMPEZA DE CONTEXTO (Anti-HTML/XML) ##########
+# ########## VERSÃO 13.0 - INTEGRAÇÃO COM IA (GEMINI) ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v12.6 Limpeza de Contexto")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.0 (IA)")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -31,6 +37,12 @@ INLABS_LOGIN_URL = os.getenv("INLABS_LOGIN_URL", config.get("INLABS_LOGIN_URL", 
 INLABS_USER = os.getenv("INLABS_USER")
 INLABS_PASS = os.getenv("INLABS_PASS")
 
+# --- NOVO: Configuração da API do Gemini ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+# ----------------------------------------
+
 # Carrega constantes do JSON
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
@@ -46,10 +58,27 @@ TERMS_AND_ACRONYMS_S2 = config.get("TERMS_AND_ACRONYMS_S2", [])
 NAMES_TO_TRACK = sorted(list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower)
 # ==========================================================
 
+# --- NOVO: Master Prompt da IA ---
+GEMINI_MASTER_PROMPT = """
+Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
+Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
+
+Critérios de Análise:
+1.  Se for ato orçamentário (MPO/Fazenda), foque no impacto: É crédito, LME, fontes? Afeta UGs da Marinha (Comando, Fundo Naval, AMAZUL)?
+2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
+3.  Se for ato de pessoal (Seção 2), quem é a pessoa e qual a ação (nomeação, exoneração, viagem)?
+4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas citado numa lista de participantes de reunião, ou 'Marinha' em nome de empresa privada), responda APENAS com a frase: "Sem impacto direto."
+
+Seja direto e objetivo.
+
+TEXTO DA PUBLICAÇÃO:
+"""
+# ---------------------------------
 
 class Publicacao(BaseModel):
     organ: Optional[str] = None; type: Optional[str] = None; summary: Optional[str] = None
     raw: Optional[str] = None; relevance_reason: Optional[str] = None; section: Optional[str] = None
+    clean_text: Optional[str] = None # Campo para guardar texto limpo para a IA
 
 class ProcessResponse(BaseModel):
     date: str; count: int; publications: List[Publicacao]; whatsapp_text: str
@@ -88,52 +117,37 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     return "\n".join(lines)
 
 def parse_gnd_change_table(full_text_content: str) -> str:
-    # Esta função já usa BeautifulSoup internamente e está segura
     soup = BeautifulSoup(full_text_content, 'lxml-xml')
     results = {'acrescimo': [], 'reducao': []}
     current_unidade = None
     current_operation = None
-
-    # Itera por todas as tabelas em todos os anexos
     for table in soup.find_all('table'):
         for row in table.find_all('tr'):
             cols = row.find_all('td')
-            # Extrai o texto limpo de todas as colunas da linha
             row_text_cells = [norm(c.get_text()) for c in cols]
             row_full_text = " ".join(row_text_cells)
-
             if "UNIDADE:" in row_full_text:
                 current_unidade = row_full_text.replace("UNIDADE:", "").strip()
                 continue 
-            
             if "PROGRAMA DE TRABALHO" in row_full_text:
                 if "ACRÉSCIMO" in row_full_text.upper():
                     current_operation = "acrescimo"
                 elif "REDUÇÃO" in row_full_text.upper() or "CANCELAMENTO" in row_full_text.upper():
                     current_operation = "reducao"
-                else:
-                    current_operation = None
+                else: current_operation = None
                 continue 
-
-            if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.upper():
-                continue
-
+            if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.upper(): continue
             if current_unidade and current_operation and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys()):
                 try:
                     ao, desc, _, _, gnd, _, _, _, _, valor = row_text_cells
                     if not valor: continue
-                    
                     clean_gnd = gnd.replace('-','').replace('ODC','').replace('INV','')
                     line = f"- AO {ao} - {desc} | GND: {clean_gnd} | Valor: {valor}"
                     results[current_operation].append((current_unidade, line))
-                except (IndexError, ValueError):
-                    continue
-    
+                except (IndexError, ValueError): continue
     if not results['acrescimo'] and not results['reducao']:
         return "Ato de Alteração de GND com impacto na Defesa/Marinha. Recomenda-se análise manual dos anexos."
-
     output_lines = ["Ato de Alteração de GND com impacto na Defesa/Marinha. Dados extraídos dos anexos:"]
-    
     if results['acrescimo']:
         output_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
         last_unidade = None
@@ -143,7 +157,6 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                 output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*") 
                 last_unidade = unidade
             output_lines.append(line)
-
     if results['reducao']:
         output_lines.append("\n**-- REDUÇÕES (Cancelamento) --**")
         last_unidade = None
@@ -153,16 +166,9 @@ def parse_gnd_change_table(full_text_content: str) -> str:
                 output_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*")
                 last_unidade = unidade
             output_lines.append(line)
-            
     return "\n".join(output_lines)
 
-def _get_context(clean_text: str, match: re.Match) -> str:
-    """Extrai o texto ao redor de um 'match' de regex (do texto limpo)."""
-    context_start = max(0, match.start() - 100)
-    context_end = min(len(clean_text), match.end() + 200)
-    context_text = clean_text[context_start:context_end]
-    return f"\"...{norm(context_text)}...\""
-
+# (Função de filtro v12.7 - Esta é o Estágio 1)
 def process_grouped_materia(
     main_article: BeautifulSoup, 
     full_text_content: str, # Este é o XML/HTML bruto
@@ -183,34 +189,17 @@ def process_grouped_materia(
 
     is_relevant = False
     reason = None
-    
-    # --- NOVO: Lógica de Limpeza de Texto ---
-    # Texto limpo para S1 e Custom Keywords (limpeza geral)
-    soup_full = BeautifulSoup(full_text_content, 'lxml-xml')
-    search_text_clean_s1 = norm(soup_full.get_text(strip=True))
-    search_content_lower_s1 = search_text_clean_s1.lower()
-    
-    # Texto limpo para S2 (limpeza especializada, remove assinaturas)
-    search_text_clean_s2 = ""
-    search_content_lower_s2 = ""
-    if "DO2" in section:
-        soup_s2 = BeautifulSoup(full_text_content, 'lxml-xml')
-        for tag in soup_s2.find_all('p', class_=['assina', 'cargo']):
-            tag.decompose()
-        search_text_clean_s2 = norm(soup_s2.get_text(strip=True))
-        search_content_lower_s2 = search_text_clean_s2.lower()
-    # --- Fim da Lógica de Limpeza ---
+    search_content_lower = norm(full_text_content).lower()
+    clean_text_for_ia = "" # Prepara o texto limpo para a IA
 
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ.lower()
         if is_mpo:
-            # Usa o texto limpo para achar os códigos de tag
-            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower_s1]
+            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
             if found_navy_codes:
                 is_relevant = True
                 summary_lower = summary.lower()
                 if "altera parcialmente grupos de natureza de despesa" in summary_lower:
-                    # Esta função usa o full_text_content (XML bruto) para parsear as tabelas
                     reason = parse_gnd_change_table(full_text_content) 
                 elif "os limites de movimentação e empenho constantes" in summary_lower:
                     reason = TEMPLATE_LME
@@ -220,72 +209,69 @@ def process_grouped_materia(
                     reason = TEMPLATE_CREDITO
                 else:
                     reason = ANNOTATION_POSITIVE_GENERIC
-            # Usa o texto limpo para achar keywords de orçamento
-            elif any(bkw in search_content_lower_s1 for bkw in BUDGET_KEYWORDS_S1):
+            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 reason = ANNOTATION_NEGATIVE
         else:
-            # Lógica de keywords S1 com CONTEXTO (busca no texto limpo S1)
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
-                match = re.search(re.escape(kw), search_content_lower_s1, re.IGNORECASE)
-                if match:
+                if kw in search_content_lower:
                     is_relevant = True
-                    reason = f"Contexto ('{kw}'): {_get_context(search_text_clean_s1, match)}"
+                    reason = f"Há menção específica à TAG: '{kw}'."
                     break
     
     elif "DO2" in section:
-        # Lógica de termos S2 com CONTEXTO (busca no texto limpo S2)
+        soup_copy = BeautifulSoup(full_text_content, 'lxml-xml')
+        for tag in soup_copy.find_all('p', class_=['assina', 'cargo']):
+            tag.decompose()
+        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
+
         for term in TERMS_AND_ACRONYMS_S2:
-            match = re.search(re.escape(term), search_content_lower_s2, re.IGNORECASE)
-            if match:
+            if term.lower() in clean_search_content_lower:
                 is_relevant = True
-                reason = f"Contexto ('{term}'): {_get_context(search_text_clean_s2, match)}"
+                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
                 break
         
         if not is_relevant:
-            # Lógica de nomes S2 com CONTEXTO (busca no texto limpo S2)
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
-                for match in re.finditer(name_lower, search_content_lower_s2):
+                for match in re.finditer(name_lower, clean_search_content_lower):
                     start_pos = max(0, match.start() - 150)
-                    context_window_text = search_content_lower_s2[start_pos:match.start()]
-                    
+                    context_window_text = clean_search_content_lower[start_pos:match.start()]
                     if any(verb in context_window_text for verb in PERSONNEL_ACTION_VERBS):
                         is_relevant = True
-                        full_context_text = search_text_clean_s2[start_pos:match.end()]
-                        reason = f"Contexto ('{name}'): \"...{norm(full_context_text)}...\""
+                        reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."
                         break
-                if is_relevant:
-                    break
+                if is_relevant: break
     
-    # Lógica de Palavra-Chave Personalizada (com CONTEXTO)
     found_custom_kw = None
-    custom_reason = None
+    custom_reason_text = None
     if custom_keywords:
-        # Busca por keywords customizadas no texto S1 (mais genérico)
         for kw in custom_keywords:
-            match = re.search(re.escape(kw), search_content_lower_s1, re.IGNORECASE)
-            if match:
+            if kw in search_content_lower:
                 found_custom_kw = kw
-                custom_reason = f"Contexto (Personalizada: '{kw}'): {_get_context(search_text_clean_s1, match)}"
+                custom_reason_text = f"Há menção à palavra-chave personalizada: '{kw}'."
                 break
     
     if found_custom_kw:
-        is_relevant = True # Garante que seja relevante
+        is_relevant = True 
         if reason and reason != ANNOTATION_NEGATIVE:
-            # Se já tinha um motivo (ex: MPO), anexa
-            reason = f"{reason}\n⚓ {custom_reason}"
+            reason = f"{reason}\n⚓ {custom_reason_text}"
         elif not reason or reason == ANNOTATION_NEGATIVE:
-            # Se não tinha motivo, ou o motivo era "negativo", substitui
-            reason = custom_reason
+            reason = custom_reason_text
 
     if is_relevant:
+        # Prepara o texto limpo para a IA
+        soup_full_clean = BeautifulSoup(full_text_content, 'lxml-xml')
+        clean_text_for_ia = norm(soup_full_clean.get_text(strip=True))
+
         return Publicacao(
             organ=organ, type=act_type, summary=summary,
-            raw=display_text, relevance_reason=reason, section=section
+            raw=display_text, relevance_reason=reason, section=section,
+            clean_text=clean_text_for_ia # Adiciona o texto limpo
         )
     return None
 
+# --- Funções de Rede (sem mudança) ---
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     if not INLABS_USER or not INLABS_PASS: raise HTTPException(status_code=500, detail="Config ausente: INLABS_USER e INLABS_PASS.")
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
@@ -309,6 +295,247 @@ async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
     if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao abrir listagem {url}: HTTP {r.status_code}")
     return r.text
 
+def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
+    soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".zip") and any(sec in (a.get_text() or href).upper() for sec in wanted): links.append(urljoin(base_url_for_rel.rstrip("/") + "/", href))
+    return sorted(list(set(links)))
+
+async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
+    r = await client.get(url)
+    if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao baixar ZIP {url}: HTTP {r.status_code}")
+    return r.content
+
+def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
+    xml_blobs: List[bytes] = [];
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for name in z.namelist():
+            if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
+    return xml_blobs
+# --- Fim das Funções de Rede ---
+
+
+# === ENDPOINT RÁPIDO (v12.7) ===
+# (Este é o endpoint antigo, mantido para o botão "Rápido")
+@app.post("/processar-inlabs", response_model=ProcessResponse)
+async def processar_inlabs(
+    data: str = Form(..., description="YYYY-MM-DD"),
+    sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
+    keywords_json: Optional[str] = Form(None, description="Um JSON string de uma lista de keywords. Ex: '[\"amazul\", \"prosub\"]'")
+):
+    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
+    custom_keywords = []
+    if keywords_json:
+        try:
+            keywords_list = json.loads(keywords_json)
+            if isinstance(keywords_list, list):
+                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except json.JSONDecodeError: pass 
+    
+    client = await inlabs_login_and_get_session()
+    try:
+        listing_url = await resolve_date_url(client, data)
+        html = await fetch_listing_html(client, data)
+        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+        if not zip_links:
+            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
+        
+        all_xml_blobs = []
+        for zurl in zip_links:
+            zb = await download_zip(client, zurl)
+            all_xml_blobs.extend(extract_xml_from_zip(zb))
+
+        materias: Dict[str, Dict] = {}
+        for blob in all_xml_blobs:
+            try:
+                soup = BeautifulSoup(blob, 'lxml-xml')
+                article = soup.find('article')
+                if not article: continue
+                materia_id = article.get('idMateria')
+                if not materia_id: continue
+                if materia_id not in materias:
+                    materias[materia_id] = {'main_article': None, 'full_text': ''}
+                materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
+                body = article.find('body')
+                if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
+                    materias[materia_id]['main_article'] = article
+            except Exception: continue
+        
+        pubs: List[Publicacao] = []
+        for materia_id, content in materias.items():
+            if content['main_article']:
+                publication = process_grouped_materia( # Filtro Estágio 1
+                    content['main_article'], content['full_text'], custom_keywords 
+                )
+                if publication: pubs.append(publication)
+        
+        seen: Set[str] = set()
+        merged: List[Publicacao] = []
+        for p in pubs:
+            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            if key not in seen:
+                seen.add(key)
+                merged.append(p)
+        
+        texto = monta_whatsapp(merged, data)
+        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
+    finally:
+        await client.aclose()
+
+
+# --- NOVO: Função de Análise de IA (Estágio 2) ---
+async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> str:
+    """Chama a API do Gemini para analisar o texto."""
+    try:
+        # Define configurações de segurança permissivas
+        safety_settings = [
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold="BLOCK_NONE"),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold="BLOCK_NONE"),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold="BLOCK_NONE"),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold="BLOCK_NONE"),
+        ]
+        # Define configuração de geração para respostas curtas e objetivas
+        generation_config = GenerationConfig(
+            temperature=0.1,
+            top_p=0.9,
+            max_output_tokens=150
+        )
+        
+        # Constrói o prompt final
+        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:10000]}" # Limita a 10k caracteres por segurança
+        
+        # Faz a chamada assíncrona
+        response = await model.generate_content_async(
+            prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        
+        # Limpa a resposta da IA
+        analysis = norm(response.text)
+        if not analysis:
+            return "Erro na análise de IA: Resposta vazia."
+        return analysis
+
+    except Exception as e:
+        print(f"Erro na API do Gemini: {e}")
+        # Tenta extrair uma mensagem de erro mais clara
+        if hasattr(e, 'message'):
+            error_msg = str(e.message)
+            if "quota" in error_msg.lower():
+                return "Erro na análise de IA: Cota de uso da API excedida."
+            if "api_key" in error_msg.lower():
+                return "Erro na análise de IA: Chave de API inválida."
+        return f"Erro na análise de IA: {str(e)[:100]}"
+# ------------------------------------------------
+
+
+# === NOVO: ENDPOINT INTELIGENTE (IA) ===
+@app.post("/processar-inlabs-ia", response_model=ProcessResponse)
+async def processar_inlabs_ia(
+    data: str = Form(..., description="YYYY-MM-DD"),
+    sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
+    keywords_json: Optional[str] = Form(None, description="JSON string de keywords")
+):
+    # 1. Verifica se a chave de IA está configurada
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="A variável de ambiente GEMINI_API_KEY não foi configurada no servidor.")
+    
+    # 2. Inicializa o modelo de IA
+    try:
+        # Usando o gemini-1.5-flash, que é rápido e barato
+        model = genai.GenerativeModel('gemini-1.5-flash') 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA: {e}")
+
+    # 3. Executa o ESTÁGIO 1 (Filtro Rápido - Lógica idêntica ao /processar-inlabs)
+    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
+    custom_keywords = []
+    if keywords_json:
+        try:
+            keywords_list = json.loads(keywords_json)
+            if isinstance(keywords_list, list):
+                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except json.JSONDecodeError: pass 
+    
+    client = await inlabs_login_and_get_session()
+    pubs_filtradas: List[Publicacao] = [] # Lista de publicações do Estágio 1
+    
+    try:
+        listing_url = await resolve_date_url(client, data)
+        html = await fetch_listing_html(client, data)
+        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+        if not zip_links:
+            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
+        
+        all_xml_blobs = []
+        for zurl in zip_links:
+            zb = await download_zip(client, zurl)
+            all_xml_blobs.extend(extract_xml_from_zip(zb))
+
+        materias: Dict[str, Dict] = {}
+        for blob in all_xml_blobs:
+            try:
+                soup = BeautifulSoup(blob, 'lxml-xml')
+                article = soup.find('article')
+                if not article: continue
+                materia_id = article.get('idMateria')
+                if not materia_id: continue
+                if materia_id not in materias:
+                    materias[materia_id] = {'main_article': None, 'full_text': ''}
+                materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
+                body = article.find('body')
+                if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
+                    materias[materia_id]['main_article'] = article
+            except Exception: continue
+        
+        for materia_id, content in materias.items():
+            if content['main_article']:
+                publication = process_grouped_materia( # Filtro Estágio 1
+                    content['main_article'], content['full_text'], custom_keywords 
+                )
+                if publication:
+                    pubs_filtradas.append(publication)
+        
+        # Desduplica a lista filtrada
+        seen: Set[str] = set()
+        merged_pubs: List[Publicacao] = []
+        for p in pubs_filtradas:
+            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+            if key not in seen:
+                seen.add(key)
+                merged_pubs.append(p)
+        
+        # 4. Executa o ESTÁGIO 2 (Análise com IA)
+        tasks = []
+        for p in merged_pubs:
+            if p.clean_text:
+                # Cria uma "tarefa" de análise para cada publicação
+                tasks.append(get_ai_analysis(p.clean_text, model))
+        
+        # Executa todas as análises de IA em paralelo
+        ai_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 5. Monta o resultado final
+        pubs_finais: List[Publicacao] = []
+        for i, p in enumerate(merged_pubs):
+            if i < len(ai_results):
+                ai_reason = ai_results[i]
+                if isinstance(ai_reason, Exception):
+                    p.relevance_reason = f"Erro na análise de IA: {ai_reason}"
+                elif "sem impacto direto" not in ai_reason.lower():
+                    # A IA confirmou a relevância, substitui o motivo
+                    p.relevance_reason = ai_reason
+                    pubs_finais.append(p)
+                # Se a IA retornou "Sem impacto direto", a publicação é
+                # simplesmente descartada e não entra no 'pubs_finais'
+            
+        texto = monta_whatsapp(pubs_finais, data)
+        return ProcessResponse(date=data, count=len(pubs_finais), publications=pubs_finais, whatsapp_text=texto)
+    
+    finally:
+        await client.aclose()
 def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
     soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
     for a in soup.find_all("a", href=True):
