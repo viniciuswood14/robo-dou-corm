@@ -58,33 +58,22 @@ TERMS_AND_ACRONYMS_S2 = config.get("TERMS_AND_ACRONYMS_S2", [])
 NAMES_TO_TRACK = sorted(list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower)
 # ==========================================================
 
-# --- Master Prompt da IA (Reforçado com UGs) ---
+# --- Master Prompt da IA ---
 GEMINI_MASTER_PROMPT = """
 Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
 Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
 
 Critérios de Análise:
-1.  Se for ato orçamentário (MPO/Fazenda), foque no impacto: É crédito, LME, fontes?
-    PROCURE ATENTAMENTE NOS ANEXOS E TABELAS por estas UGs da Marinha:
-    - 52131 (Comando da Marinha)
-    - 52931 (Fundo Naval)
-    - 52233 (AMAZUL)
-    - 52932 (Fundo de Desenv. Ensino Prof. Marítimo)
-    - 52000 (Ministério da Defesa - Genérico)
-    - 52133 (SECIRM)
-    - 52232 (CCCPM)
-    Se encontrar valores para estas UGs, resuma o impacto (ex: "Crédito suplementar de R$ 10M para UG 52131").
-
+1.  Se for ato orçamentário (MPO/Fazenda), foque no impacto: É crédito, LME, fontes? Afeta UGs da Marinha (Comando, Fundo Naval, AMAZUL)?
 2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
-
-3.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas citado numa lista de participantes de reunião, ou 'Marinha' em nome de empresa privada), responda APENAS com a frase: "Sem impacto direto."
+3.  Se for ato de pessoal (Seção 2), quem é a pessoa e qual a ação (nomeação, exoneração, viagem)?
+4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas citado numa lista de participantes de reunião, ou 'Marinha' em nome de empresa privada), responda APENAS com a frase: "Sem impacto direto."
 
 Seja direto e objetivo.
 
 TEXTO DA PUBLICAÇÃO:
 """
 # ---------------------------------
-
 
 class Publicacao(BaseModel):
     organ: Optional[str] = None; type: Optional[str] = None; summary: Optional[str] = None
@@ -419,10 +408,8 @@ async def processar_inlabs(
 async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> Optional[str]:
     """Chama a API do Gemini. Retorna análise, erro leve ou None se bloqueado."""
     try:
-        # --- INÍCIO DA MODIFICAÇÃO (Limite de Texto) ---
         # Constrói o prompt final
-        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text}" # Limite de caracteres removido
-        # --- FIM DA MODIFICAÇÃO (Limite de Texto) ---
+        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:10000]}" # Limita a 10k caracteres por segurança
         
         # --- ALTERAÇÃO v13.9 ---
         # Faz a chamada assíncrona SEM safety_settings e generation_config
@@ -528,31 +515,17 @@ async def processar_inlabs_ia(
                 seen.add(key)
                 merged_pubs.append(p)
         
-        # --- INÍCIO DA MODIFICAÇÃO (LÓGICA DO2) ---
-
-        # 4. Separa publicações da Seção 2 (que não vão para IA)
-        pubs_para_ia: List[Publicacao] = []
-        pubs_sem_ia: List[Publicacao] = [] # Publicações DO2
-        
-        for p in merged_pubs:
-            if p.section == "DO2":
-                pubs_sem_ia.append(p)
-            else:
-                pubs_para_ia.append(p)
-        
-        # 5. Executa o ESTÁGIO 2 (Análise com IA) apenas nas publicações relevantes (não-DO2)
+        # 4. Executa o ESTÁGIO 2 (Análise com IA)
         tasks = []
-        for p in pubs_para_ia:
+        for p in merged_pubs:
             if p.clean_text:
                 tasks.append(get_ai_analysis(p.clean_text, model))
         
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 6. Monta o resultado final
+        # 5. Monta o resultado final (Lógica MODIFICADA para incluir 'Sem impacto direto')
         pubs_finais: List[Publicacao] = []
-        
-        # Processa os resultados da IA (para DO1, DO3, etc.)
-        for i, p in enumerate(pubs_para_ia):
+        for i, p in enumerate(merged_pubs):
             if i < len(ai_results):
                 ai_reason_result = ai_results[i]
                 
@@ -573,7 +546,9 @@ async def processar_inlabs_ia(
                         p.relevance_reason = ai_reason_result
                         pubs_finais.append(p)
                     
+                    # --- INÍCIO DA MODIFICAÇÃO (Lógica Condicional MPO) ---
                     elif "sem impacto direto" in ai_reason_result.lower():
+                        
                         # Verifica se a publicação é do MPO
                         is_mpo_pub = MPO_ORG_STRING in (p.organ or "").lower()
                         
@@ -584,6 +559,7 @@ async def processar_inlabs_ia(
                         else:
                             # Regra 2: Se NÃO for MPO e for "sem impacto", DESCARTA.
                             pass # Não faz o append
+                    # --- FIM DA MODIFICAÇÃO ---
                         
                     else:
                         # IA funcionou e confirmou relevância
@@ -599,11 +575,6 @@ async def processar_inlabs_ia(
                 # Caso raro: não houve resultado da IA para esta publicação
                 pubs_finais.append(p)
         
-        # 7. Adiciona as publicações da Seção 2 (que pularam a IA) de volta na lista final
-        pubs_finais.extend(pubs_sem_ia)
-        
-        # --- FIM DA MODIFICAÇÃO (LÓGICA DO2) ---
-
         texto = monta_whatsapp(pubs_finais, data)
         return ProcessResponse(date=data, count=len(pubs_finais), publications=pubs_finais, whatsapp_text=texto)
     
