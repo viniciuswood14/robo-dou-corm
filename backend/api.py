@@ -540,3 +540,80 @@ async def processar_inlabs_ia(
     
     finally:
         await client.aclose()
+        
+        # === NOVO: ENDPOINT DE TESTE DA IA ===
+@app.get("/test-ia")
+async def test_ia_endpoint():
+    """Endpoint simples para testar a conectividade com a API do Gemini."""
+    
+    # 1. Verifica se a chave de IA está configurada
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="A variável de ambiente GEMINI_API_KEY não foi configurada no servidor.")
+    
+    # 2. Inicializa o modelo de IA
+    try:
+        model = genai.GenerativeModel('gemini-1.0-pro') 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA: {e}")
+
+    # 3. Define um prompt e texto de teste MUITO simples
+    test_prompt = "Responda à seguinte pergunta de forma concisa:"
+    test_text = "Qual a capital do Brasil?"
+    full_prompt = f"{test_prompt}\n\n{test_text}"
+
+    # 4. Tenta chamar a IA com o prompt de teste
+    try:
+        # Define configurações de segurança (mesmo para o teste)
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        generation_config = GenerationConfig(temperature=0.1, max_output_tokens=50)
+        
+        response = await model.generate_content_async(
+            full_prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        
+        # 5. Verifica a resposta (usando a lógica robusta da v13.6)
+        try:
+            analysis_parts = []
+            for part in response.parts:
+                if hasattr(part, 'text'):
+                    analysis_parts.append(part.text)
+            
+            analysis = norm(" ".join(analysis_parts))
+
+            if not analysis:
+                reason = "desconhecido"
+                try:
+                    reason = response.prompt_feedback.finish_reason.name
+                except Exception: pass
+                return {"result": f"Teste FALHOU. Resposta vazia da IA (Razão: {reason})."}
+            
+            # Se chegou aqui, a IA respondeu!
+            return {"result": f"Teste OK! Resposta da IA: '{analysis}'"}
+
+        except ValueError as e: 
+            # Bloqueio de segurança (improvável para esta pergunta, mas tratado)
+            print(f"Bloco de IA detectado no teste (ValueError): {e}")
+            return {"result": "Teste FALHOU. A IA foi bloqueada (SAFETY)."}
+
+    except Exception as e:
+        # Outro erro (chave inválida, cota, conexão...)
+        print(f"Erro na API do Gemini durante o teste: {e}")
+        error_msg = str(e).lower()
+        if "quota" in error_msg:
+            err_detail = "Cota de uso da API excedida."
+        elif "api_key" in error_msg:
+            err_detail = "Chave de API inválida."
+        else:
+            err_detail = str(e)[:100]
+        raise HTTPException(status_code=500, detail=f"Teste FALHOU. Erro na chamada da API: {err_detail}")
+
+# === FIM DO ENDPOINT DE TESTE ===
+
+        
