@@ -5,21 +5,22 @@ from typing import List, Optional, Set, Dict
 from datetime import datetime
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
-import asyncio # Importado para o processamento em paralelo da IA
+import asyncio 
 
 import httpx
 from bs4 import BeautifulSoup
 
-# --- NOVO: Importações da IA ---
+# --- NOVO: Importações da IA (Corrigidas) ---
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, SafetySetting, HarmCategory
+from google.generativeai.types import GenerationConfig # Esta estava correta
+from google.generativeai import HarmCategory, SafetySetting # Esta é a correção
 # -----------------------------
 
 # #####################################################################
-# ########## VERSÃO 13.0 - INTEGRAÇÃO COM IA (GEMINI) ##########
+# ########## VERSÃO 13.1 - CORREÇÃO DE IMPORTAÇÃO (IA) ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.0 (IA)")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.1 (IA)")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -381,247 +382,4 @@ async def processar_inlabs(
         texto = monta_whatsapp(merged, data)
         return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
     finally:
-        await client.aclose()
-
-
-# --- NOVO: Função de Análise de IA (Estágio 2) ---
-async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> str:
-    """Chama a API do Gemini para analisar o texto."""
-    try:
-        # Define configurações de segurança permissivas
-        safety_settings = [
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold="BLOCK_NONE"),
-        ]
-        # Define configuração de geração para respostas curtas e objetivas
-        generation_config = GenerationConfig(
-            temperature=0.1,
-            top_p=0.9,
-            max_output_tokens=150
-        )
-        
-        # Constrói o prompt final
-        prompt = f"{GEMINI_MASTER_PROMPT}\n\n{clean_text[:10000]}" # Limita a 10k caracteres por segurança
-        
-        # Faz a chamada assíncrona
-        response = await model.generate_content_async(
-            prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        
-        # Limpa a resposta da IA
-        analysis = norm(response.text)
-        if not analysis:
-            return "Erro na análise de IA: Resposta vazia."
-        return analysis
-
-    except Exception as e:
-        print(f"Erro na API do Gemini: {e}")
-        # Tenta extrair uma mensagem de erro mais clara
-        if hasattr(e, 'message'):
-            error_msg = str(e.message)
-            if "quota" in error_msg.lower():
-                return "Erro na análise de IA: Cota de uso da API excedida."
-            if "api_key" in error_msg.lower():
-                return "Erro na análise de IA: Chave de API inválida."
-        return f"Erro na análise de IA: {str(e)[:100]}"
-# ------------------------------------------------
-
-
-# === NOVO: ENDPOINT INTELIGENTE (IA) ===
-@app.post("/processar-inlabs-ia", response_model=ProcessResponse)
-async def processar_inlabs_ia(
-    data: str = Form(..., description="YYYY-MM-DD"),
-    sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
-    keywords_json: Optional[str] = Form(None, description="JSON string de keywords")
-):
-    # 1. Verifica se a chave de IA está configurada
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="A variável de ambiente GEMINI_API_KEY não foi configurada no servidor.")
-    
-    # 2. Inicializa o modelo de IA
-    try:
-        # Usando o gemini-1.5-flash, que é rápido e barato
-        model = genai.GenerativeModel('gemini-1.5-flash') 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA: {e}")
-
-    # 3. Executa o ESTÁGIO 1 (Filtro Rápido - Lógica idêntica ao /processar-inlabs)
-    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
-    custom_keywords = []
-    if keywords_json:
-        try:
-            keywords_list = json.loads(keywords_json)
-            if isinstance(keywords_list, list):
-                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
-        except json.JSONDecodeError: pass 
-    
-    client = await inlabs_login_and_get_session()
-    pubs_filtradas: List[Publicacao] = [] # Lista de publicações do Estágio 1
-    
-    try:
-        listing_url = await resolve_date_url(client, data)
-        html = await fetch_listing_html(client, data)
-        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
-        if not zip_links:
-            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
-        
-        all_xml_blobs = []
-        for zurl in zip_links:
-            zb = await download_zip(client, zurl)
-            all_xml_blobs.extend(extract_xml_from_zip(zb))
-
-        materias: Dict[str, Dict] = {}
-        for blob in all_xml_blobs:
-            try:
-                soup = BeautifulSoup(blob, 'lxml-xml')
-                article = soup.find('article')
-                if not article: continue
-                materia_id = article.get('idMateria')
-                if not materia_id: continue
-                if materia_id not in materias:
-                    materias[materia_id] = {'main_article': None, 'full_text': ''}
-                materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
-                body = article.find('body')
-                if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
-                    materias[materia_id]['main_article'] = article
-            except Exception: continue
-        
-        for materia_id, content in materias.items():
-            if content['main_article']:
-                publication = process_grouped_materia( # Filtro Estágio 1
-                    content['main_article'], content['full_text'], custom_keywords 
-                )
-                if publication:
-                    pubs_filtradas.append(publication)
-        
-        # Desduplica a lista filtrada
-        seen: Set[str] = set()
-        merged_pubs: List[Publicacao] = []
-        for p in pubs_filtradas:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
-            if key not in seen:
-                seen.add(key)
-                merged_pubs.append(p)
-        
-        # 4. Executa o ESTÁGIO 2 (Análise com IA)
-        tasks = []
-        for p in merged_pubs:
-            if p.clean_text:
-                # Cria uma "tarefa" de análise para cada publicação
-                tasks.append(get_ai_analysis(p.clean_text, model))
-        
-        # Executa todas as análises de IA em paralelo
-        ai_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 5. Monta o resultado final
-        pubs_finais: List[Publicacao] = []
-        for i, p in enumerate(merged_pubs):
-            if i < len(ai_results):
-                ai_reason = ai_results[i]
-                if isinstance(ai_reason, Exception):
-                    p.relevance_reason = f"Erro na análise de IA: {ai_reason}"
-                elif "sem impacto direto" not in ai_reason.lower():
-                    # A IA confirmou a relevância, substitui o motivo
-                    p.relevance_reason = ai_reason
-                    pubs_finais.append(p)
-                # Se a IA retornou "Sem impacto direto", a publicação é
-                # simplesmente descartada e não entra no 'pubs_finais'
-            
-        texto = monta_whatsapp(pubs_finais, data)
-        return ProcessResponse(date=data, count=len(pubs_finais), publications=pubs_finais, whatsapp_text=texto)
-    
-    finally:
-        await client.aclose()
-def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections: List[str]) -> List[str]:
-    soup = BeautifulSoup(html, "html.parser"); links: List[str] = []; wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.lower().endswith(".zip") and any(sec in (a.get_text() or href).upper() for sec in wanted): links.append(urljoin(base_url_for_rel.rstrip("/") + "/", href))
-    return sorted(list(set(links)))
-
-async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
-    r = await client.get(url)
-    if r.status_code >= 400: raise HTTPException(status_code=502, detail=f"Falha ao baixar ZIP {url}: HTTP {r.status_code}")
-    return r.content
-
-def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
-    xml_blobs: List[bytes] = [];
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        for name in z.namelist():
-            if name.lower().endswith(".xml"): xml_blobs.append(z.read(name))
-    return xml_blobs
-
-@app.post("/processar-inlabs", response_model=ProcessResponse)
-async def processar_inlabs(
-    data: str = Form(..., description="YYYY-MM-DD"),
-    sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
-    keywords_json: Optional[str] = Form(None, description="Um JSON string de uma lista de keywords. Ex: '[\"amazul\", \"prosub\"]'")
-):
-    secs = [s.strip().upper() for s in sections.split(",") if s.strip()] if sections else ["DO1"]
-    
-    custom_keywords = []
-    if keywords_json:
-        try:
-            keywords_list = json.loads(keywords_json)
-            if isinstance(keywords_list, list):
-                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
-        except json.JSONDecodeError:
-            pass 
-    
-    client = await inlabs_login_and_get_session()
-    try:
-        listing_url = await resolve_date_url(client, data)
-        html = await fetch_listing_html(client, data)
-        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
-        if not zip_links:
-            raise HTTPException(status_code=404, detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.")
-        
-        all_xml_blobs = []
-        for zurl in zip_links:
-            zb = await download_zip(client, zurl)
-            all_xml_blobs.extend(extract_xml_from_zip(zb))
-
-        materias: Dict[str, Dict] = {}
-        for blob in all_xml_blobs:
-            try:
-                soup = BeautifulSoup(blob, 'lxml-xml')
-                article = soup.find('article')
-                if not article: continue
-                materia_id = article.get('idMateria')
-                if not materia_id: continue
-                if materia_id not in materias:
-                    materias[materia_id] = {'main_article': None, 'full_text': ''}
-                materias[materia_id]['full_text'] += blob.decode('utf-8', errors='ignore') + "\n"
-                body = article.find('body')
-                if body and body.find('Identifica') and body.find('Identifica').get_text(strip=True):
-                    materias[materia_id]['main_article'] = article
-            except Exception:
-                continue
-        
-        pubs: List[Publicacao] = []
-        for materia_id, content in materias.items():
-            if content['main_article']:
-                publication = process_grouped_materia(
-                    content['main_article'], 
-                    content['full_text'],
-                    custom_keywords 
-                )
-                if publication:
-                    pubs.append(publication)
-        
-        seen: Set[str] = set()
-        merged: List[Publicacao] = []
-        for p in pubs:
-            key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
-            if key not in seen:
-                seen.add(key)
-                merged.append(p)
-        
-        texto = monta_whatsapp(merged, data)
-        return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
-    finally:
-        await client.aclose()
+        await
