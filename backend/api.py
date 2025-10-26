@@ -210,21 +210,142 @@ def parse_gnd_change_table(full_text_content: str) -> str:
     return "\n".join(output_lines)
 
 # ### MODIFICAÇÃO 2: process_grouped_materia agora seta a flag 'is_mpo_navy_hit_flag'
+# ### MODIFICAÇÃO 2.1: Refinando a lógica 'is_mpo_navy_hit' (Lógica Explícita)
 def process_grouped_materia(
     main_article: BeautifulSoup, 
     full_text_content: str, # Este é o XML/HTML bruto
     custom_keywords: List[str]
 ) -> Optional[Publicacao]:
-    # ... (código inalterado) ...
+    
     organ = norm(main_article.get('artCategory', ''))
     organ_lower = organ.lower() # Helper
 
-    # --- INÍCIO DA MODIFICAÇÃO (Exclusão de Órgãos) ---
     if (
         "comando da aeronáutica" in organ_lower or
         "comando do exército" in organ_lower
     ):
-        return None # Exclui publicações da Aeronáutica e Exército
+        return None 
+
+    section = main_article.get('pubName', '').upper()
+    body = main_article.find('body')
+    if not body: return None
+    act_type = norm(body.find('Identifica').get_text(strip=True) if body.find('Identifica') else "")
+    if not act_type: return None
+    summary = norm(body.find('Ementa').get_text(strip=True) if body.find('Ementa') else "")
+    display_text = norm(body.get_text(strip=True))
+    if not summary:
+        match = re.search(r'EMENTA:(.*?)(Vistos|ACORDAM)', display_text, re.DOTALL | re.I)
+        if match: summary = norm(match.group(1))
+
+    is_relevant = False
+    reason = None
+    search_content_lower = norm(full_text_content).lower()
+    clean_text_for_ia = "" 
+    is_mpo_navy_hit_flag = False # <-- FLAG INICIALIZADA
+
+    if "DO1" in section:
+        is_mpo = MPO_ORG_STRING in organ.lower()
+        if is_mpo:
+            found_navy_codes = [code for code in MPO_NAVY_TAGS if code in search_content_lower]
+            if found_navy_codes:
+                is_relevant = True
+                
+                # --- INÍCIO DA NOVA LÓGICA DE FLAG (Explícita) ---
+                
+                # Separa os códigos encontrados
+                found_specific_navy_tags = [code for code in found_navy_codes if code != "52000"]
+                found_general_defense_tag = "52000" in found_navy_codes
+
+                # Lógica conforme sua solicitação:
+                
+                # Se achou 52000 E outra tag específica (52131, 52931, etc.) -> Prompt MPO
+                if found_general_defense_tag and found_specific_navy_tags:
+                    is_mpo_navy_hit_flag = True
+                
+                # Se achou SÓ uma tag específica (52131, etc.) mas não 52000 -> Prompt MPO
+                elif not found_general_defense_tag and found_specific_navy_tags:
+                    is_mpo_navy_hit_flag = True
+                
+                # Se achou SÓ 52000 -> Prompt Padrão (flag continua False)
+                elif found_general_defense_tag and not found_specific_navy_tags:
+                    is_mpo_navy_hit_flag = False 
+                
+                # --- FIM DA NOVA LÓGICA DE FLAG ---
+
+                summary_lower = summary.lower()
+                if "altera parcialmente grupos de natureza de despesa" in summary_lower:
+                    reason = parse_gnd_change_table(full_text_content) 
+                elif "os limites de movimentação e empenho constantes" in summary_lower:
+                    reason = TEMPLATE_LME
+                elif "modifica fontes de recursos" in summary_lower:
+                    reason = TEMPLATE_FONTE
+                elif "abre aos orçamentos fiscal" in summary_lower:
+                    reason = TEMPLATE_CREDITO
+                else:
+                    reason = ANNOTATION_POSITIVE_GENERIC
+            
+            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
+                is_relevant = True
+                reason = ANNOTATION_NEGATIVE
+        else:
+            for kw in KEYWORDS_DIRECT_INTEREST_S1:
+                if kw in search_content_lower:
+                    is_relevant = True
+                    reason = f"Há menção específica à TAG: '{kw}'."
+                    break
+    
+    elif "DO2" in section:
+        # ... (código da Seção 2 permanece inalterado) ...
+        soup_copy = BeautifulSoup(full_text_content, 'lxml-xml')
+        for tag in soup_copy.find_all('p', class_=['assina', 'cargo']):
+            tag.decompose()
+        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
+
+        for term in TERMS_AND_ACRONYMS_S2:
+            if term.lower() in clean_search_content_lower:
+                is_relevant = True
+                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
+                break
+        
+        if not is_relevant:
+            for name in NAMES_TO_TRACK:
+                name_lower = name.lower()
+                for match in re.finditer(name_lower, clean_search_content_lower):
+                    start_pos = max(0, match.start() - 150)
+                    context_window_text = clean_search_content_lower[start_pos:match.start()]
+                    if any(verb in context_window_text for verb in PERSONNEL_ACTION_VERBS):
+                        is_relevant = True
+                        reason = f"Ato de pessoal (Seção 2): menção a '{name}' em contexto de ação."
+                        break
+                if is_relevant: break
+    
+    # ... (código de 'custom_keywords' permanece inalterado) ...
+    found_custom_kw = None
+    custom_reason_text = None
+    if custom_keywords:
+        for kw in custom_keywords:
+            if kw in search_content_lower:
+                found_custom_kw = kw
+                custom_reason_text = f"Há menção à palavra-chave personalizada: '{kw}'."
+                break
+    
+    if found_custom_kw:
+        is_relevant = True 
+        if reason and reason != ANNOTATION_NEGATIVE:
+            reason = f"{reason}\n⚓ {custom_reason_text}"
+        elif not reason or reason == ANNOTATION_NEGATIVE:
+            reason = custom_reason_text
+
+    if is_relevant:
+        soup_full_clean = BeautifulSoup(full_text_content, 'lxml-xml')
+        clean_text_for_ia = norm(soup_full_clean.get_text(strip=True))
+        return Publicacao(
+            organ=organ, type=act_type, summary=summary,
+            raw=display_text, relevance_reason=reason, section=section,
+            clean_text=clean_text_for_ia,
+            is_mpo_navy_hit=is_mpo_navy_hit_flag # <-- FLAG PASSADA (agora mais inteligente)
+        )
+    return None
     # --- FIM DA MODIFICAÇÃO ---
 
     section = main_article.get('pubName', '').upper()
