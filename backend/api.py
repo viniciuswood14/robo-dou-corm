@@ -10,17 +10,17 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 
-# --- Importações da IA (Corrigidas) ---
+# --- Importações da IA (Corrigidas v13.3) ---
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
-from google.generativeai import HarmCategory, SafetySetting
-# -----------------------------
+# Removida a importação de HarmCategory e SafetySetting
+# -------------------------------------------
 
 # #####################################################################
-# ########## VERSÃO 13.2 - Correção de Syntax/Except (IA) ##########
+# ########## VERSÃO 13.3 - Correção de Import (IA) via Dicionário ##########
 # #####################################################################
 
-app = FastAPI(title="Robô DOU API (INLABS XML) - v13.2 (IA)")
+app = FastAPI(title="Robô DOU API (INLABS XML) - v13.3 (IA)")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -388,13 +388,17 @@ async def processar_inlabs(
 async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> str:
     """Chama a API do Gemini para analisar o texto."""
     try:
-        # Define configurações de segurança permissivas
+        # --- ALTERAÇÃO v13.3 ---
+        # Define configurações de segurança como dicionários de strings
+        # Isso evita os erros de importação.
         safety_settings = [
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold="BLOCK_NONE"),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold="BLOCK_NONE"),
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
+        # -----------------------
+
         # Define configuração de geração para respostas curtas e objetivas
         generation_config = GenerationConfig(
             temperature=0.1,
@@ -420,8 +424,7 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel) -> str:
 
     except Exception as e:
         print(f"Erro na API do Gemini: {e}")
-        # --- BLOCO DE ERRO MELHORADO (v13.2) ---
-        # Trata o erro de forma mais moderna (Python 3+)
+        # Bloco de erro melhorado (v13.2)
         error_msg = str(e).lower()
         if "quota" in error_msg:
             return "Erro na análise de IA: Cota de uso da API excedida."
