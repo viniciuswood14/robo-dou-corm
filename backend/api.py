@@ -448,7 +448,7 @@ async def processar_inlabs_ia(
     # 2. Inicializa o modelo de IA
     try:
         # Usando o gemini-1.5-flash, que é rápido e barato
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        model = genai.GenerativeModel('gemini-2.5-pro') 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao inicializar o modelo de IA: {e}")
 
