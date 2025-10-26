@@ -514,7 +514,7 @@ async def processar_inlabs_ia(
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
         
 # 5. Monta o resultado final (Lógica MODIFICADA para incluir 'Sem impacto direto')
-        pubs_finais: List<Publicacao> = []
+        pubs_finais: List[Publicacao] = []
         for i, p in enumerate(merged_pubs):
             if i < len(ai_results):
                 ai_reason_result = ai_results[i]
