@@ -14,18 +14,23 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 
 # =====================================================================================
-# Robô DOU API - versão 13.9.3
+# Robô DOU API - versão 13.9.4
 #
-# Diferenças vs 13.9.2:
-# - Nova função parse_mpo_budget_table() extrai valores reais (ações, totais R$)
-#   das tabelas das Portarias MPO (crédito suplementar, fonte, GND, LME etc.).
-# - process_grouped_materia agora chama parse_mpo_budget_table para todos atos MPO
-#   de interesse (não só "alteração de GND"), então some os placeholders vazios.
-# - Restante da estrutura permanece igual (login InLabs, prompts IA, etc.).
+# Diferenças principais:
+# - parse_mpo_budget_table() atualizado com regex tolerante
+#   (ÓRGÃO SUPERIOR, UNIDADE ORÇAMENTÁRIA, UG, etc),
+#   detecta blocos (ACRÉSCIMO)/(REDUÇÃO) mesmo sem o prefixo "PROGRAMA DE TRABALHO",
+#   captura totais "TOTAL - FISCAL" / "TOTAL - GERAL",
+#   agrupa por UO (52131, 52931, etc.) e monta texto WhatsApp com valores 💸.
+#
+# - process_grouped_materia() chama parse_mpo_budget_table() sempre que for ato MPO
+#   de LME / Fonte / Crédito / GND e houver códigos de Marinha.
+#
+# - Rotas /processar-inlabs e /processar-inlabs-ia mantidas.
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU API (INLABS XML) - v13.9.3 (MPO parser valores Marinha)"
+    title="Robô DOU API (INLABS XML) - v13.9.4 (MPO parser valores Marinha)"
 )
 
 app.add_middleware(
@@ -63,7 +68,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", config.get("GEMINI_API_KEY", None))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Constantes auxiliares
+# Constantes auxiliares (templates e listas de palavras-chave)
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
 TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
@@ -119,7 +124,7 @@ TEXTO DA PUBLICAÇÃO:
 """
 
 # =====================================================================================
-# MODELOS
+# MODELOS Pydantic
 # =====================================================================================
 
 class Publicacao(BaseModel):
@@ -167,7 +172,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
     lines.append("")
 
-    # agrupar publicações por seção DO1/DO2/etc
+    # agrupar publicações por seção (DO1, DO2...)
     pubs_by_section: Dict[str, List[Publicacao]] = {}
     for p in pubs:
         sec = p.section or "DOU"
@@ -194,6 +199,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
 
+            # Se a IA disser que errou, a gente marca com ⚠️
             if (
                 reason.startswith("Erro na análise de IA:")
                 or reason.startswith("Erro GRAVE")
@@ -227,7 +233,7 @@ MB_UOS = {
     "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
     "52931": "Fundo Naval",
     "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
-    "52000": "Ministério da Defesa",  # Defesa inteira (pode incluir MB indiretamente)
+    "52000": "Ministério da Defesa",  # Defesa inteira
 }
 
 def _clean_text_local(t: str) -> str:
@@ -251,15 +257,17 @@ def _parse_money(raw: str) -> int:
 def parse_mpo_budget_table(full_text_content: str) -> str:
     """
     Versão reforçada:
-    - regex mais flexível pra ÓRGÃO / UNIDADE (aceita 'ÓRGÃO SUPERIOR:', 'UNIDADE ORÇAMENTÁRIA:' etc.)
-    - detecta blocos '(ACRÉSCIMO)' ou '(REDUÇÃO)' mesmo que não venha exatamente 'PROGRAMA DE TRABALHO (...)'
-    - tenta extrair totais 'TOTAL - FISCAL' / 'TOTAL - GERAL'
-    - agrupa por UO (52131, 52931 etc) e monta mensagem estilo WhatsApp
+    - regex flexível pra ÓRGÃO / UNIDADE (aceita 'ÓRGÃO SUPERIOR:', 'UNIDADE ORÇAMENTÁRIA:', 'UG:')
+    - detecta blocos '(ACRÉSCIMO)' / '(REDUÇÃO)' mesmo sem 'PROGRAMA DE TRABALHO (...)'
+    - captura ações (código + descrição + valor)
+    - captura totais 'TOTAL - FISCAL' / 'TOTAL - GERAL'
+    - filtra só blocos que batem Defesa/Marinha
+    - monta texto pronto pro WhatsApp
     """
 
     soup = BeautifulSoup(full_text_content, "html.parser")
 
-    # normaliza todas as tabelas em linhas
+    # pega todas as linhas de todas as tabelas
     all_rows = []
     for table in soup.find_all("table"):
         for tr in table.find_all("tr"):
@@ -267,7 +275,7 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             if any(col for col in cols):
                 all_rows.append(cols)
 
-    blocks = []  # {orgao, uo_code, uo_name, tipo, acoes[], totais{}}
+    blocks = []  # cada elemento: {orgao, uo_code, uo_name, tipo, acoes[], totais{}}
     current_orgao = None
     current_uo_code = None
     current_uo_name = None
@@ -284,7 +292,6 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             "totais": {},
         }
 
-    # helpers de detecção mais tolerantes
     ORGAO_REGEX = re.compile(
         r"ÓRGÃO(?:\s+\w+)?\s*:\s*(\d+)\s*-\s*(.+)",
         flags=re.IGNORECASE
@@ -305,13 +312,13 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
     for row in all_rows:
         joined = " ".join(row)
 
-        # 1) Detecta ÓRGÃO / ÓRGÃO SUPERIOR / ÓRGÃO VINCULADO...
+        # 1) Detecta ÓRGÃO / ÓRGÃO SUPERIOR / etc
         m_org = ORGAO_REGEX.search(joined)
         if m_org:
             numero = m_org.group(1).strip()
             nome = m_org.group(2).strip()
             current_orgao = f"{numero} - {nome}"
-            # reset ao mudar órgão
+            # reset de contexto
             current_uo_code = None
             current_uo_name = None
             current_tipo = None
@@ -330,8 +337,8 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             continue
 
         # 3) Detecta início de bloco (ACRÉSCIMO)/(REDUÇÃO)
-        #    Alguns anexos escrevem "PROGRAMA DE TRABALHO ( ACRÉSCIMO )"
-        #    outros só têm uma linha "(ACRÉSCIMO)" isolado
+        #    às vezes vem "PROGRAMA DE TRABALHO ( ACRÉSCIMO )",
+        #    às vezes só "(ACRÉSCIMO)" na linha
         m_tipo = BLOCO_TIPO_REGEX.search(joined)
         if m_tipo:
             tipo_raw = m_tipo.group(1).upper()
@@ -346,10 +353,11 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
 
         # 4) Se estamos dentro de um bloco, tentar extrair ações e totais
         if current_block:
-            # ação orçamentária (código + descrição + valor)
-            # heurística: primeira coluna começa com dígito, última coluna é numérica grande
+            # ação orçamentária típica:
+            #   primeira coluna começa com dígito ("6112 123G", "2317 00SX 7004")
+            #   última coluna é um valor de dinheiro
             possible_code = row[0].strip() if len(row) > 0 else ""
-            possible_val = row[-1].strip() if len(row) > 0 else ""
+            possible_val  = row[-1].strip() if len(row) > 0 else ""
             has_code = re.match(r"^\d{3,4}", possible_code) is not None
             has_money = (re.search(r"\d", possible_val) is not None and _parse_money(possible_val) > 0)
 
@@ -379,7 +387,10 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
     for b in blocks:
         orgao_ok = (
             b["orgao"]
-            and ("DEFESA" in b["orgao"].upper() or "52000" in b["orgao"])
+            and (
+                "DEFESA" in b["orgao"].upper()
+                or "52000" in b["orgao"]
+            )
         )
         uo_ok = (
             b["uo_code"] in MB_UOS
@@ -388,14 +399,13 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             mb_blocks.append(b)
 
     if not mb_blocks:
-        # fallback de segurança
         return (
             "Publicação orçamentária do MPO potencialmente relevante, "
             "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa nos anexos."
         )
 
-    # 6) Agrupamento por UO (ex.: '52131 - Comando da Marinha')
-    grouped = {}
+    # 6) Agrupa por UO (ex.: '52131 - Comando da Marinha')
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
     for b in mb_blocks:
         if b["uo_code"] and b["uo_name"]:
             uo_key = f"{b['uo_code']} - {b['uo_name']}"
@@ -406,14 +416,14 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
 
         grouped.setdefault(uo_key, []).append(b)
 
-    # 7) Montar saída WhatsApp
-    out_lines = []
+    # 7) Monta saída WhatsApp
+    out_lines: List[str] = []
     out_lines.append(
         "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:\n"
     )
 
     for uo_key, lista in grouped.items():
-        # tenta substituir nome por apelido conhecido (MB_UOS)
+        # tenta substituir pelo 'apelido' conhecido da MB
         nice_key = uo_key
         m_code = re.match(r"^(\d{5})", uo_key)
         if m_code:
@@ -424,7 +434,8 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
         out_lines.append(f"*{nice_key}*")
         for b in lista:
             tipo_legenda = (
-                "Suplementação (ACRÉSCIMO)" if b["tipo"] == "ACRÉSCIMO"
+                "Suplementação (ACRÉSCIMO)"
+                if b["tipo"] == "ACRÉSCIMO"
                 else "Cancelamento (REDUÇÃO)"
             )
 
@@ -438,16 +449,17 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             else:
                 out_lines.append(f"  - {tipo_legenda} (valores por ação abaixo)")
 
-            # listar até 6 ações principais
+            # listar até 6 ações
             for acao in b["acoes"][:6]:
                 val_fmt = f"R$ {acao['valor']:,}".replace(",", ".")
                 desc_curta = acao["desc"]
-                out_lines.append(f"    • {acao['acao']} {desc_curta} — {val_fmt}")
+                out_lines.append(
+                    f"    • {acao['acao']} {desc_curta} — {val_fmt}"
+                )
 
-        out_lines.append("")
+        out_lines.append("")  # linha em branco entre UOs
 
     return "\n".join(out_lines).strip()
-
 
 # =====================================================================================
 # CLASSIFICAÇÃO INICIAL (SEM IA)
@@ -467,7 +479,7 @@ def process_grouped_materia(
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
 
-    # Ignorar FAB/Exército pra não poluir
+    # Ignorar conteúdos que são claramente só FAB ou Exército
     if (
         "comando da aeronáutica" in organ_lower
         or "comando do exército" in organ_lower
@@ -475,21 +487,33 @@ def process_grouped_materia(
         return None
 
     section = (main_article.get("pubName", "") or "").upper()
+
     body = main_article.find("body")
     if not body:
         return None
 
-    act_type = norm(body.find("Identifica").get_text(strip=True) if body.find("Identifica") else "")
+    act_type = norm(
+        body.find("Identifica").get_text(strip=True)
+        if body.find("Identifica")
+        else ""
+    )
     if not act_type:
         return None
 
-    summary = norm(body.find("Ementa").get_text(strip=True) if body.find("Ementa") else "")
+    summary = norm(
+        body.find("Ementa").get_text(strip=True)
+        if body.find("Ementa")
+        else ""
+    )
+
     display_text = norm(body.get_text(strip=True))
 
+    # fallback pra ementa
     if not summary:
-        # fallback ementa
         match = re.search(
-            r"EMENTA:(.*?)(Vistos|ACORDAM)", display_text, re.DOTALL | re.I
+            r"EMENTA:(.*?)(Vistos|ACORDAM)",
+            display_text,
+            re.DOTALL | re.I,
         )
         if match:
             summary = norm(match.group(1))
@@ -507,7 +531,7 @@ def process_grouped_materia(
         is_mpo = MPO_ORG_STRING in organ_lower
 
         if is_mpo:
-            # checar se a portaria cita códigos de interesse Marinha/Defesa
+            # Checa se esta portaria toca UOs da MB
             found_navy_codes = [
                 code for code in MPO_NAVY_TAGS
                 if code.lower() in search_content_lower
@@ -515,6 +539,7 @@ def process_grouped_materia(
 
             if found_navy_codes:
                 is_relevant = True
+
                 # heurística de impacto direto
                 found_specific = [c for c in found_navy_codes if c != "52000"]
                 found_defesa = "52000" in found_navy_codes
@@ -527,7 +552,6 @@ def process_grouped_materia(
 
                 summary_lower = summary.lower()
 
-                # gatilhos que caracterizam o tipo de ato MPO
                 gatilho_gnd = (
                     "grupo de natureza da despesa" in summary_lower
                     or "grupos de natureza da despesa" in summary_lower
@@ -568,17 +592,16 @@ def process_grouped_materia(
                     or "crédito suplementar no valor de" in summary_lower
                 )
 
+                # NOVO: sempre tenta extrair valores reais pra MPO relevante
                 if gatilho_gnd or gatilho_lme or gatilho_fonte or gatilho_credito:
-                    # NOVO: sempre tenta extrair valores reais da tabela MPO
                     reason = parse_mpo_budget_table(full_text_content)
                 else:
-                    # MPO + códigos da MB detectados mas não bateu nenhum gatilho esperado
                     reason = (
                         ANNOTATION_POSITIVE_GENERIC
                         or "Publicação potencialmente relevante para a Marinha. Recomenda-se análise detalhada."
                     )
 
-            # MPO mas sem códigos MB
+            # É MPO mas não achou códigos MB/Defesa
             elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 reason = (
@@ -586,8 +609,8 @@ def process_grouped_materia(
                     or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
                 )
 
-        # não é MPO, mas pode ser Marinha direta (Ex.: EMA, DPC, DHN etc)
         else:
+            # Não é MPO, mas pode ter Marinha direta (EMA, DPC, DHN etc.)
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
                     is_relevant = True
@@ -602,9 +625,11 @@ def process_grouped_materia(
         for tag in soup_copy.find_all("p", class_=["assina", "cargo"]):
             tag.decompose()
 
-        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
+        clean_search_content_lower = norm(
+            soup_copy.get_text(strip=True)
+        ).lower()
 
-        # 1) termos institucionais
+        # 1) termos institucionais rastreados
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
                 is_relevant = True
@@ -681,7 +706,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
 
-    # warm-up (tenta abrir base, ignora erro)
+    # warm-up
     try:
         await client.get(INLABS_BASE)
     except Exception:
@@ -703,7 +728,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     """
-    Depois do login, acha a pasta/listagem da data desejada e retorna URL base.
+    Depois do login, acha a pasta da data desejada e retorna URL base.
     """
     r = await client.get(INLABS_BASE)
     r.raise_for_status()
@@ -781,8 +806,7 @@ async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
 
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     """
-    Lê um ZIP em memória e retorna todos os XMLs
-    (cada XML é um pedaço de uma mesma idMateria ou de matérias diferentes).
+    Lê um ZIP em memória e retorna todos os XMLs (cada XML é um pedaço de uma matéria).
     """
     xml_blobs: List[bytes] = []
 
@@ -808,9 +832,9 @@ async def processar_inlabs(
 ):
     """
     Pipeline 'rápida', sem IA.
-    - Login na InLabs
+    - Login no InLabs
     - Baixa ZIPs do dia e extrai XML
-    - Agrupa cada idMateria
+    - Agrupa fragmentos por idMateria
     - process_grouped_materia decide relevância e reason
     - Gera WhatsApp final
     """
@@ -821,7 +845,7 @@ async def processar_inlabs(
         else ["DO1"]
     )
 
-    # Keywords personalizadas do formulário
+    # Keywords personalizadas
     custom_keywords: List[str] = []
     if keywords_json:
         try:
@@ -851,7 +875,7 @@ async def processar_inlabs(
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
 
-        # agrupar por materia_id
+        # Agrupar por idMateria
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_xml_blobs:
             try:
@@ -897,7 +921,7 @@ async def processar_inlabs(
                 if publication:
                     pubs.append(publication)
 
-        # deduplicar publicações parecidas
+        # Deduplicar publicações parecidas
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -935,10 +959,10 @@ async def get_ai_analysis(
 ) -> Optional[str]:
     """
     Chama Gemini pra gerar UMA frase curta de impacto.
-    Retorno pode ser:
+    Retornos possíveis:
       - string normal
-      - "Erro na análise de IA: ..." (erro leve)
-      - None (mudo/bloqueado)
+      - "Erro na análise de IA: ..." (erro recuperável)
+      - None (modelo não quis responder)
     """
 
     try:
@@ -960,7 +984,7 @@ async def get_ai_analysis(
                 return None
 
         except ValueError as e:
-            # bloqueio de segurança/harm
+            # tipicamente bloqueio de segurança
             print(f"Bloco de IA (ValueError): {e}")
             return None
         except Exception as e_inner:
@@ -990,9 +1014,9 @@ async def processar_inlabs_ia(
 ):
     """
     Pipeline com IA:
-    - Roda todo o fluxo de /processar-inlabs
-    - Depois chama Gemini para gerar uma frase curta por item
-    - Protege casos MPO com impacto direto na Marinha (is_mpo_navy_hit)
+    - faz todo o fluxo de /processar-inlabs
+    - depois chama Gemini pra uma frase curta por item
+    - protege MPO com impacto direto na Marinha (is_mpo_navy_hit)
     """
 
     if not GEMINI_API_KEY:
@@ -1134,7 +1158,7 @@ async def processar_inlabs_ia(
                 continue
 
             if ai_out is None:
-                # IA ficou muda, mantém reason original (parse_mpo_budget_table etc.)
+                # IA ficou muda, mantém reason original (que já pode ter vindo do parser MPO)
                 pubs_finais.append(p)
                 continue
 
@@ -1153,20 +1177,20 @@ async def processar_inlabs_ia(
                         p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
                         pubs_finais.append(p)
                     elif MPO_ORG_STRING in (p.organ or "").lower():
-                        # é MPO mas sem hit direto -> pode aceitar "sem impacto direto"
+                        # é MPO mas sem hit direto -> ok aceitar o 'sem impacto direto'
                         p.relevance_reason = ai_out
                         pubs_finais.append(p)
                     else:
-                        # não é MPO e IA falou "sem impacto": filtra fora (reduz ruído)
+                        # se não é MPO e IA falou que é irrelevante -> filtra fora
                         pass
                     continue
 
-                # caso normal: IA deu uma frase curta útil
+                # caso feliz: IA deu uma frase útil
                 p.relevance_reason = ai_out
                 pubs_finais.append(p)
                 continue
 
-            # fallback inesperado
+            # fallback
             pubs_finais.append(p)
 
         texto = monta_whatsapp(pubs_finais, data)
