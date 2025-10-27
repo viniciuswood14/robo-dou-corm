@@ -253,61 +253,44 @@ def _parse_money(raw: str) -> int:
         return int("".join(m))
     except:
         return 0
+
 def parse_mpo_budget_table(full_text_content: str) -> str:
     """
-    Extrai dados orçamentários das tabelas MPO (inclusive dentro de CDATA),
-    filtra apenas blocos ligados ao Ministério da Defesa / UOs da Marinha
-    e gera texto pronto pro WhatsApp.
-
-    Melhorias:
-    - Detecta quando é portaria de alteração de fonte/IRP (ex: Portaria SOF/MPO nº 402),
-      e muda o tom da mensagem ("Alteração de fonte de recurso...") em vez de
-      "Suplementação/Redução".
-    - Consolida ações parecidas (evita duplicar 21GN / 21GN 0001).
+    Versão reforçada:
+    - regex flexível pra ÓRGÃO / UNIDADE (aceita 'ÓRGÃO SUPERIOR:', 'UNIDADE ORÇAMENTÁRIA:', 'UG:')
+    - detecta blocos '(ACRÉSCIMO)' / '(REDUÇÃO)' mesmo sem 'PROGRAMA DE TRABALHO (...)'
+    - captura ações (código + descrição + valor)
+    - captura totais 'TOTAL - FISCAL' / 'TOTAL - GERAL'
+    - filtra só blocos que batem Defesa/Marinha
+    - monta texto pronto pro WhatsApp
     """
 
-    # -------------------------------------------------
-    # Helpers locais
-    # -------------------------------------------------
-    def _clean_text_local(t: str) -> str:
-        if t is None:
-            return ""
-        return re.sub(r"\s+", " ", t).strip()
+    soup = BeautifulSoup(full_text_content, "html.parser")
 
-    def _parse_money(raw: str) -> int:
-        raw = _clean_text_local(raw)
-        if not raw:
-            return 0
-        raw = raw.replace(".", "").replace(",", "")
-        m = re.findall(r"\d+", raw)
-        if not m:
-            return 0
-        try:
-            return int("".join(m))
-        except:
-            return 0
+    # pega todas as linhas de todas as tabelas
+    all_rows = []
+    for table in soup.find_all("table"):
+        for tr in table.find_all("tr"):
+            cols = [_clean_text_local(td.get_text(" ")) for td in tr.find_all(["td", "th"])]
+            if any(col for col in cols):
+                all_rows.append(cols)
 
-    def _canonicalize_action_code(raw_code: str) -> str:
-        """
-        Normaliza código de ação para agrupar variantes tipo:
-        "6112 21GN" vs "6112 21GN 0001"
-        -> mantém só os dois primeiros blocos numéricos/letras.
-        """
-        parts = raw_code.split()
-        if len(parts) >= 2:
-            # Ex: ["6112","21GN","0001"] -> "6112 21GN"
-            return " ".join(parts[:2])
-        return raw_code.strip()
+    blocks = []  # cada elemento: {orgao, uo_code, uo_name, tipo, acoes[], totais{}}
+    current_orgao = None
+    current_uo_code = None
+    current_uo_name = None
+    current_tipo = None   # "ACRÉSCIMO" ou "REDUÇÃO"
+    current_block = None
 
-    MB_UOS = {
-        "52131": "Comando da Marinha",
-        "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
-        "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
-        "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
-        "52931": "Fundo Naval",
-        "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
-        "52000": "Ministério da Defesa",  # nível ministério
-    }
+    def start_new_block():
+        return {
+            "orgao": current_orgao,
+            "uo_code": current_uo_code,
+            "uo_name": current_uo_name,
+            "tipo": current_tipo,
+            "acoes": [],
+            "totais": {},
+        }
 
     ORGAO_REGEX = re.compile(
         r"ÓRGÃO(?:\s+\w+)?\s*:\s*(\d+)\s*-\s*(.+)",
@@ -326,173 +309,92 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
         flags=re.IGNORECASE
     )
 
-    # -------------------------------------------------
-    # 1. Detectar se essa matéria é de alteração de fonte / IRP
-    #    (isso muda o texto que vamos montar no final)
-    # -------------------------------------------------
-    lower_all = full_text_content.lower()
-    is_alteracao_fonte = any(
-        kw in lower_all
-        for kw in [
-            "modifica fontes de recursos",
-            "modifica fonte de recursos",
-            "fonte de recurso",
-            "fontes de recursos",
-            "identificador de resultado primário",
-            "identificador de resultado primario",
-            "alteração de fonte",
-            "alteracao de fonte",
-            "reclassificação de fonte",
-            "reclassificacao de fonte",
-        ]
-    )
+    for row in all_rows:
+        joined = " ".join(row)
 
-    # -------------------------------------------------
-    # 2. Extrair TODOS os blocos CDATA (é onde estão as tabelas MPO)
-    # -------------------------------------------------
-    cdata_blocks = re.findall(
-        r"<!\[CDATA\[(.*?)\]\]>",
-        full_text_content,
-        flags=re.DOTALL | re.IGNORECASE
-    )
-    if not cdata_blocks:
-        # fallback: tenta usar tudo mesmo assim
-        cdata_blocks = [full_text_content]
-
-    # -------------------------------------------------
-    # Estrutura intermediária
-    # Cada bloco orçamentário detectado ficará assim:
-    # {
-    #   "orgao": "52000 - Ministério da Defesa",
-    #   "uo_code": "52931",
-    #   "uo_name": "Fundo Naval",
-    #   "tipo": "ACRÉSCIMO" / "REDUÇÃO" (ou None se não detectamos),
-    #   "acoes": [ { "acao": "6112 21GN", "desc": "...", "valor": 1906510 }, ... ],
-    #   "totais": { "FISCAL": 5271675, "GERAL": ... }
-    # }
-    # -------------------------------------------------
-    all_detected_blocks = []
-
-    for blob in cdata_blocks:
-        soup_blob = BeautifulSoup(blob, "html.parser")
-        tables = soup_blob.find_all("table")
-        if not tables:
+        # 1) Detecta ÓRGÃO / ÓRGÃO SUPERIOR / etc
+        m_org = ORGAO_REGEX.search(joined)
+        if m_org:
+            numero = m_org.group(1).strip()
+            nome = m_org.group(2).strip()
+            current_orgao = f"{numero} - {nome}"
+            # reset de contexto
+            current_uo_code = None
+            current_uo_name = None
+            current_tipo = None
+            current_block = None
             continue
 
-        current_orgao = None
-        current_uo_code = None
-        current_uo_name = None
-        current_tipo = None
-        current_block = None
+        # 2) Detecta UNIDADE / UNIDADE ORÇAMENTÁRIA / UG
+        m_uo = UO_REGEX.search(joined)
+        if m_uo:
+            numero = m_uo.group(2).strip()
+            nome = m_uo.group(3).strip()
+            current_uo_code = numero
+            current_uo_name = nome
+            current_tipo = None
+            current_block = None
+            continue
 
-        def start_new_block():
-            return {
-                "orgao": current_orgao,
-                "uo_code": current_uo_code,
-                "uo_name": current_uo_name,
-                "tipo": current_tipo,
-                "acoes": [],
-                "totais": {},
-            }
+        # 3) Detecta início de bloco (ACRÉSCIMO)/(REDUÇÃO)
+        #    às vezes vem "PROGRAMA DE TRABALHO ( ACRÉSCIMO )",
+        #    às vezes só "(ACRÉSCIMO)" na linha
+        m_tipo = BLOCO_TIPO_REGEX.search(joined)
+        if m_tipo:
+            tipo_raw = m_tipo.group(1).upper()
+            if current_block:
+                blocks.append(current_block)
+            if "ACR" in tipo_raw:
+                current_tipo = "ACRÉSCIMO"
+            else:
+                current_tipo = "REDUÇÃO"
+            current_block = start_new_block()
+            continue
 
-        for table in tables:
-            # transforma tabela em linhas limpas
-            all_rows = []
-            for tr in table.find_all("tr"):
-                cols = [
-                    _clean_text_local(td.get_text(" ", strip=True))
-                    for td in tr.find_all(["td","th"])
-                ]
-                if any(col for col in cols):
-                    all_rows.append(cols)
-
-            for row in all_rows:
-                joined = " ".join(row)
-
-                # Detecta ÓRGÃO (ex: "ÓRGÃO: 52000 - Ministério da Defesa")
-                m_org = ORGAO_REGEX.search(joined)
-                if m_org:
-                    numero = m_org.group(1).strip()
-                    nome = m_org.group(2).strip()
-                    current_orgao = f"{numero} - {nome}"
-                    current_uo_code = None
-                    current_uo_name = None
-                    current_tipo = None
-                    current_block = None
-                    continue
-
-                # Detecta UNIDADE (ex: "UNIDADE: 52931 - Fundo Naval")
-                m_uo = UO_REGEX.search(joined)
-                if m_uo:
-                    numero = m_uo.group(2).strip()
-                    nome = m_uo.group(3).strip()
-                    current_uo_code = numero
-                    current_uo_name = nome
-                    current_tipo = None
-                    current_block = None
-                    continue
-
-                # Detecta início de sub-bloco "(ACRÉSCIMO)" ou "(REDUÇÃO)"
-                m_tipo = BLOCO_TIPO_REGEX.search(joined)
-                if m_tipo:
-                    tipo_raw = m_tipo.group(1).upper()
-                    # Salva bloco anterior
-                    if current_block:
-                        all_detected_blocks.append(current_block)
-
-                    if "ACR" in tipo_raw:
-                        current_tipo = "ACRÉSCIMO"
-                    else:
-                        current_tipo = "REDUÇÃO"
-                    current_block = start_new_block()
-                    continue
-
-                # Se estamos dentro de um bloco, tentar extrair conteúdo
-                if current_block:
-                    # Possível linha de ação orçamentária com valor:
-                    # primeira coluna = código (ex: "6112 21GN" ou "6112 21GN 0001")
-                    # última coluna = valor numérico
-                    possible_code = row[0].strip() if len(row) > 0 else ""
-                    possible_val  = row[-1].strip() if len(row) > 0 else ""
-                    has_code = re.match(r"^\d{3,4}", possible_code) is not None
-                    has_money = (
-                        re.search(r"\d", possible_val) is not None
-                        and _parse_money(possible_val) > 0
-                    )
-
-                    if has_code and has_money and len(row) >= 2:
-                        desc = row[1].strip()
-                        norm_code = _canonicalize_action_code(possible_code)
-                        current_block["acoes"].append({
-                            "acao": norm_code,
-                            "desc": desc,
-                            "valor": _parse_money(possible_val),
-                        })
-                        continue
-
-                    # Totais "TOTAL - FISCAL   5.271.675"
-                    m_total = TOTAL_REGEX.search(joined)
-                    if m_total and len(row) >= 2:
-                        tipo_total = m_total.group(1).upper()
-                        raw_val = row[-1]
-                        current_block["totais"][tipo_total] = _parse_money(raw_val)
-                        continue
-
-        # fim das tabelas -> guarda último bloco aberto
+        # 4) Se estamos dentro de um bloco, tentar extrair ações e totais
         if current_block:
-            all_detected_blocks.append(current_block)
+            # ação orçamentária típica:
+            #   primeira coluna começa com dígito ("6112 123G", "2317 00SX 7004")
+            #   última coluna é um valor de dinheiro
+            possible_code = row[0].strip() if len(row) > 0 else ""
+            possible_val  = row[-1].strip() if len(row) > 0 else ""
+            has_code = re.match(r"^\d{3,4}", possible_code) is not None
+            has_money = (re.search(r"\d", possible_val) is not None and _parse_money(possible_val) > 0)
 
-    # -------------------------------------------------
-    # 3. Filtrar apenas blocos Defesa/Marinha
-    # -------------------------------------------------
+            if has_code and has_money and len(row) >= 2:
+                desc = row[1].strip()
+                current_block["acoes"].append({
+                    "acao": possible_code,
+                    "desc": desc,
+                    "valor": _parse_money(possible_val),
+                })
+                continue
+
+            # totais tipo "TOTAL - FISCAL   325.799.445"
+            m_total = TOTAL_REGEX.search(joined)
+            if m_total and len(row) >= 2:
+                tipo_total = m_total.group(1).upper()
+                raw_val = row[-1]
+                current_block["totais"][tipo_total] = _parse_money(raw_val)
+                continue
+
+    # salva último bloco aberto
+    if current_block:
+        blocks.append(current_block)
+
+    # 5) filtrar blocos relevantes p/ Marinha / Defesa
     mb_blocks = []
-    for b in all_detected_blocks:
+    for b in blocks:
         orgao_ok = (
             b["orgao"]
-            and ("DEFESA" in b["orgao"].upper() or "52000" in b["orgao"])
+            and (
+                "DEFESA" in b["orgao"].upper()
+                or "52000" in b["orgao"]
+            )
         )
-        uo_ok = (b["uo_code"] in MB_UOS)
-
+        uo_ok = (
+            b["uo_code"] in MB_UOS
+        )
         if orgao_ok or uo_ok:
             mb_blocks.append(b)
 
@@ -502,32 +404,8 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa nos anexos."
         )
 
-    # -------------------------------------------------
-    # 4. Consolidar ações repetidas
-    #    (mesma ação-base aparece várias linhas '0001','0002' etc.)
-    # -------------------------------------------------
-    for b in mb_blocks:
-        dedup: Dict[str, Dict[str, Any]] = {}
-        for a in b["acoes"]:
-            key = (a["acao"], a["desc"])
-            if key not in dedup:
-                dedup[key] = {
-                    "acao": a["acao"],
-                    "desc": a["desc"],
-                    "valor": 0,
-                }
-            dedup[key]["valor"] += a["valor"]
-
-        # agora tira itens idênticos demais tipo:
-        #   "6112 21GN" vs "6112 21GN 0001"
-        # a essa altura _canonicalize_action_code já transformou ambos pra "6112 21GN",
-        # então eles já caíram juntos no mesmo key.
-        b["acoes"] = list(dedup.values())
-
-    # -------------------------------------------------
-    # 5. Agrupar blocos por UO (UO code + nome amigável)
-    # -------------------------------------------------
-    grouped = {}  # uo_key -> [blocos]
+    # 6) Agrupa por UO (ex.: '52131 - Comando da Marinha')
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
     for b in mb_blocks:
         if b["uo_code"] and b["uo_name"]:
             uo_key = f"{b['uo_code']} - {b['uo_name']}"
@@ -535,27 +413,17 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             uo_key = b["orgao"]
         else:
             uo_key = "Unidade não identificada"
+
         grouped.setdefault(uo_key, []).append(b)
 
-    # -------------------------------------------------
-    # 6. Montar mensagem final
-    # -------------------------------------------------
-    out_lines = []
+    # 7) Monta saída WhatsApp
+    out_lines: List[str] = []
+    out_lines.append(
+        "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:\n"
+    )
 
-    if is_alteracao_fonte:
-        out_lines.append(
-            "Alteração de fonte de recurso/IRP com impacto na Defesa/Marinha. "
-            "Recursos foram realocados entre fontes internas; valores a seguir:"
-        )
-    else:
-        out_lines.append(
-            "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:"
-        )
-
-    out_lines.append("")  # linha em branco
-
-    for uo_key, blocos in grouped.items():
-        # Se a UO existir na nossa tabela de nomes oficiais, usa o nome bonito
+    for uo_key, lista in grouped.items():
+        # tenta substituir pelo 'apelido' conhecido da MB
         nice_key = uo_key
         m_code = re.match(r"^(\d{5})", uo_key)
         if m_code:
@@ -564,48 +432,35 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
                 nice_key = f"{code} - {MB_UOS[code]}"
 
         out_lines.append(f"*{nice_key}*")
-
-        # Junta totais por tipo (ACRÉSCIMO vs REDUÇÃO) dentro da mesma UO
-        # e também prepara lista de ações
-        for b in blocos:
-            # decide o rótulo
-            if is_alteracao_fonte:
-                # não usar "Cancelamento (REDUÇÃO)" que soa negativo;
-                # descreve genericamente ajuste interno:
-                rotulo = "Ajuste interno de fonte"
-            else:
-                rotulo = (
-                    "Suplementação (ACRÉSCIMO)"
-                    if b["tipo"] == "ACRÉSCIMO"
-                    else "Cancelamento (REDUÇÃO)"
-                )
+        for b in lista:
+            tipo_legenda = (
+                "Suplementação (ACRÉSCIMO)"
+                if b["tipo"] == "ACRÉSCIMO"
+                else "Cancelamento (REDUÇÃO)"
+            )
 
             total_fiscal = b["totais"].get("FISCAL", 0)
-            total_geral = b["totais"].get("GERAL", 0)
+            total_geral  = b["totais"].get("GERAL", 0)
             total_base = total_fiscal if total_fiscal else total_geral
 
             if total_base:
                 val_fmt = f"R$ {total_base:,}".replace(",", ".")
-                if is_alteracao_fonte:
-                    out_lines.append(
-                        f"  - {rotulo}: {val_fmt} (troca de fonte, não aumento líquido de gasto)"
-                    )
-                else:
-                    out_lines.append(f"  - {rotulo}: {val_fmt}")
+                out_lines.append(f"  - {tipo_legenda}: {val_fmt}")
             else:
-                out_lines.append(f"  - {rotulo}: valores por ação abaixo")
+                out_lines.append(f"  - {tipo_legenda} (valores por ação abaixo)")
 
-            # listar até ~5 ações mais relevantes
-            for a in b["acoes"][:5]:
-                val_fmt = f"R$ {a['valor']:,}".replace(",", ".")
-                desc_curta = a["desc"]
-                # deixar a descrição mais curta tirando repetições "do Ministério da Defesa" duplicadas?
-                # vamos deixar por enquanto
-                out_lines.append(f"    • {desc_curta} — {val_fmt}")
+            # listar até 6 ações
+            for acao in b["acoes"][:6]:
+                val_fmt = f"R$ {acao['valor']:,}".replace(",", ".")
+                desc_curta = acao["desc"]
+                out_lines.append(
+                    f"    • {acao['acao']} {desc_curta} — {val_fmt}"
+                )
 
-        out_lines.append("")
+        out_lines.append("")  # linha em branco entre UOs
 
     return "\n".join(out_lines).strip()
+
 # =====================================================================================
 # CLASSIFICAÇÃO INICIAL (SEM IA)
 # =====================================================================================
