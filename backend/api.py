@@ -14,18 +14,23 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 
 # =====================================================================================
-# Robô DOU API - versão 13.9.3
+# Robô DOU API - versão 13.9.4
 #
-# Diferenças vs 13.9.2:
-# - Nova função parse_mpo_budget_table() extrai valores reais (ações, totais R$)
-#   das tabelas das Portarias MPO (crédito suplementar, fonte, GND, LME etc.).
-# - process_grouped_materia agora chama parse_mpo_budget_table para todos atos MPO
-#   de interesse (não só "alteração de GND"), então some os placeholders vazios.
-# - Restante da estrutura permanece igual (login InLabs, prompts IA, etc.).
+# Diferenças principais:
+# - parse_mpo_budget_table() atualizado com regex tolerante
+#   (ÓRGÃO SUPERIOR, UNIDADE ORÇAMENTÁRIA, UG, etc),
+#   detecta blocos (ACRÉSCIMO)/(REDUÇÃO) mesmo sem o prefixo "PROGRAMA DE TRABALHO",
+#   captura totais "TOTAL - FISCAL" / "TOTAL - GERAL",
+#   agrupa por UO (52131, 52931, etc.) e monta texto WhatsApp com valores 💸.
+#
+# - process_grouped_materia() chama parse_mpo_budget_table() sempre que for ato MPO
+#   de LME / Fonte / Crédito / GND e houver códigos de Marinha.
+#
+# - Rotas /processar-inlabs e /processar-inlabs-ia mantidas.
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU API (INLABS XML) - v13.9.3 (MPO parser valores Marinha)"
+    title="Robô DOU API (INLABS XML) - v13.9.4 (MPO parser valores Marinha)"
 )
 
 app.add_middleware(
@@ -63,7 +68,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", config.get("GEMINI_API_KEY", None))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Constantes auxiliares
+# Constantes auxiliares (templates e listas de palavras-chave)
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
 TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
@@ -119,7 +124,7 @@ TEXTO DA PUBLICAÇÃO:
 """
 
 # =====================================================================================
-# MODELOS
+# MODELOS Pydantic
 # =====================================================================================
 
 class Publicacao(BaseModel):
@@ -167,7 +172,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
     lines.append("")
 
-    # agrupar publicações por seção DO1/DO2/etc
+    # agrupar publicações por seção (DO1, DO2...)
     pubs_by_section: Dict[str, List[Publicacao]] = {}
     for p in pubs:
         sec = p.section or "DOU"
@@ -194,6 +199,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
 
+            # Se a IA disser que errou, a gente marca com ⚠️
             if (
                 reason.startswith("Erro na análise de IA:")
                 or reason.startswith("Erro GRAVE")
@@ -227,7 +233,7 @@ MB_UOS = {
     "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
     "52931": "Fundo Naval",
     "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
-    "52000": "Ministério da Defesa",  # Defesa inteira (pode incluir MB indiretamente)
+    "52000": "Ministério da Defesa",  # Defesa inteira
 }
 
 def _clean_text_local(t: str) -> str:
@@ -250,160 +256,245 @@ def _parse_money(raw: str) -> int:
 
 def parse_mpo_budget_table(full_text_content: str) -> str:
     """
-    Lê todas as tabelas da(s) matérias MPO, identifica blocos
-    por ÓRGÃO e UNIDADE, foca nas UOs da MB/Defesa e monta
-    um resumo com ACRÉSCIMO (suplementação) / REDUÇÃO (cancelamento),
-    ações e totais por UO.
-
-    Retorna string pronto pra WhatsApp.
+    Versão CDATA-aware:
+    1. Encontra todos os blocos <![CDATA[ ... ]]> dentro do XML da matéria.
+    2. Para cada bloco, lê as <table> e extrai:
+       - ÓRGÃO / UNIDADE (inclui ÓRGÃO: 52000 - Ministério da Defesa, UNIDADE: 52931 - Fundo Naval etc.)
+       - tipo do bloco (ACRÉSCIMO / REDUÇÃO)
+       - linhas de ação orçamentária (código + descrição + valor)
+       - TOTAL - FISCAL / TOTAL - GERAL
+    3. Filtra apenas blocos ligados a Defesa/Marinha (52000, 52131, 52931 etc.).
+    4. Monta texto WhatsApp com valores 💸.
     """
 
-    # Muitos anexos vêm bem-formados em XML/HTML, mas alguns trechos vêm
-    # com tags que 'lxml-xml' não gosta. "html.parser" é mais tolerante.
-    soup = BeautifulSoup(full_text_content, "html.parser")
+    # ---------------------------
+    # helpers locais (repetidos aqui pra ficar autocontido)
+    # ---------------------------
+    def _clean_text_local(t: str) -> str:
+        if t is None:
+            return ""
+        return re.sub(r"\s+", " ", t).strip()
 
-    # Vamos linearizar todas as linhas de todas as tabelas:
-    all_rows = []
-    for table in soup.find_all("table"):
-        for tr in table.find_all("tr"):
-            cols = [_clean_text_local(td.get_text(" ")) for td in tr.find_all(["td", "th"])]
-            if any(col for col in cols):
-                all_rows.append(cols)
+    def _parse_money(raw: str) -> int:
+        raw = _clean_text_local(raw)
+        if not raw:
+            return 0
+        raw = raw.replace(".", "").replace(",", "")
+        m = re.findall(r"\d+", raw)
+        if not m:
+            return 0
+        try:
+            return int("".join(m))
+        except:
+            return 0
 
-    blocks = []  # cada block = { orgao, uo_code, uo_name, tipo, acoes[], totais{} }
-    current_orgao = None
-    current_uo_code = None
-    current_uo_name = None
-    current_tipo = None  # "ACRÉSCIMO" ou "REDUÇÃO"
-    current_block = None
+    MB_UOS = {
+        "52131": "Comando da Marinha",
+        "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
+        "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
+        "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
+        "52931": "Fundo Naval",
+        "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
+        "52000": "Ministério da Defesa",  # Defesa inteira
+    }
 
-    def start_new_block():
-        return {
-            "orgao": current_orgao,
-            "uo_code": current_uo_code,
-            "uo_name": current_uo_name,
-            "tipo": current_tipo,  # "ACRÉSCIMO"/"REDUÇÃO"
-            "acoes": [],  # [{acao, desc, valor(int)}]
-            "totais": {},  # {"FISCAL": int, "SEGURIDADE": int, "GERAL": int}
-        }
+    ORGAO_REGEX = re.compile(
+        r"ÓRGÃO(?:\s+\w+)?\s*:\s*(\d+)\s*-\s*(.+)",
+        flags=re.IGNORECASE
+    )
+    UO_REGEX = re.compile(
+        r"(UNIDADE(?:\s+\w+)?|UNIDADE\s+ORÇAMENTÁRIA|UNIDADE\s+ORCAMENTARIA|UG)\s*:\s*(\d+)\s*-\s*(.+)",
+        flags=re.IGNORECASE,
+    )
+    BLOCO_TIPO_REGEX = re.compile(
+        r"\(\s*(ACRÉSCIMO|ACRESCIMO|REDUÇÃO|REDUCAO)\s*\)",
+        flags=re.IGNORECASE
+    )
+    TOTAL_REGEX = re.compile(
+        r"TOTAL\s*-\s*(FISCAL|SEGURIDADE|GERAL)",
+        flags=re.IGNORECASE
+    )
 
-    for row in all_rows:
-        joined = " ".join(row)
+    # ---------------------------
+    # 1. Extrair TODOS os blocos CDATA
+    # ---------------------------
+    cdata_blocks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", full_text_content,
+                              flags=re.DOTALL | re.IGNORECASE)
 
-        # Detecta ÓRGÃO (ex: "ÓRGÃO: 52000 - Ministério da Defesa")
-        m_org = re.search(r"ÓRGÃO:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
-        if m_org:
-            current_orgao = f"{m_org.group(1).strip()} - {m_org.group(2).strip()}"
-            # ao trocar órgão, limpar contexto de UO/bloco
-            current_uo_code = None
-            current_uo_name = None
-            current_tipo = None
-            current_block = None
+    # fallback: se por acaso algum XML veio sem CDATA (raro, mas possível),
+    # adiciona o texto inteiro também
+    if not cdata_blocks:
+        cdata_blocks = [full_text_content]
+
+    # ---------------------------
+    # Estruturas de saída intermediária
+    # ---------------------------
+    blocks = []  # cada bloco: {orgao, uo_code, uo_name, tipo, acoes[], totais{}}
+
+    # ---------------------------
+    # 2. Processar cada bloco CDATA separadamente
+    # ---------------------------
+    for blob in cdata_blocks:
+        soup_blob = BeautifulSoup(blob, "html.parser")
+        tables = soup_blob.find_all("table")
+        if not tables:
             continue
 
-        # Detecta UNIDADE (ex: "UNIDADE: 52131 - Comando da Marinha")
-        m_uo = re.search(r"UNIDADE:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
-        if m_uo:
-            current_uo_code = m_uo.group(1).strip()
-            current_uo_name = m_uo.group(2).strip()
-            current_tipo = None
-            current_block = None
-            continue
+        current_orgao = None
+        current_uo_code = None
+        current_uo_name = None
+        current_tipo = None   # "ACRÉSCIMO" ou "REDUÇÃO"
+        current_block = None
 
-        # Detecta início de bloco "PROGRAMA DE TRABALHO ( ACRÉSCIMO )" ou "( REDUÇÃO )"
-        m_tipo = re.search(
-            r"PROGRAMA DE TRABALHO\s*\(\s*(ACRÉSCIMO|REDUÇÃO)\s*\)",
-            joined,
-            flags=re.IGNORECASE,
-        )
-        if m_tipo:
-            tipo_txt = m_tipo.group(1).upper()
-            # se havia bloco aberto, empurra pra lista
-            if current_block:
-                blocks.append(current_block)
-            current_tipo = "ACRÉSCIMO" if "ACR" in tipo_txt else "REDUÇÃO"
-            current_block = start_new_block()
-            continue
+        def start_new_block():
+            return {
+                "orgao": current_orgao,
+                "uo_code": current_uo_code,
+                "uo_name": current_uo_name,
+                "tipo": current_tipo,
+                "acoes": [],
+                "totais": {},
+            }
 
-        # Dentro de um bloco ativo: capturar ações e totais
+        for table in tables:
+            all_rows = []
+            for tr in table.find_all("tr"):
+                cols = [
+                    _clean_text_local(td.get_text(" ", strip=True))
+                    for td in tr.find_all(["td","th"])
+                ]
+                if any(col for col in cols):
+                    all_rows.append(cols)
+
+            for row in all_rows:
+                joined = " ".join(row)
+
+                # Detectar ÓRGÃO (ÓRGÃO:, ÓRGÃO SUPERIOR:, etc.)
+                m_org = ORGAO_REGEX.search(joined)
+                if m_org:
+                    numero = m_org.group(1).strip()
+                    nome = m_org.group(2).strip()
+                    current_orgao = f"{numero} - {nome}"
+                    current_uo_code = None
+                    current_uo_name = None
+                    current_tipo = None
+                    current_block = None
+                    continue
+
+                # Detectar UNIDADE / UNIDADE ORÇAMENTÁRIA / UG
+                m_uo = UO_REGEX.search(joined)
+                if m_uo:
+                    numero = m_uo.group(2).strip()
+                    nome = m_uo.group(3).strip()
+                    current_uo_code = numero
+                    current_uo_name = nome
+                    current_tipo = None
+                    current_block = None
+                    continue
+
+                # Detectar início de sub-bloco "(ACRÉSCIMO)" ou "(REDUÇÃO)"
+                m_tipo = BLOCO_TIPO_REGEX.search(joined)
+                if m_tipo:
+                    tipo_raw = m_tipo.group(1).upper()
+                    # salva o bloco anterior antes de iniciar um novo
+                    if current_block:
+                        blocks.append(current_block)
+
+                    if "ACR" in tipo_raw:
+                        current_tipo = "ACRÉSCIMO"
+                    else:
+                        current_tipo = "REDUÇÃO"
+
+                    current_block = start_new_block()
+                    continue
+
+                # Se estamos dentro de um bloco atual, tentar extrair conteúdo
+                if current_block:
+                    # 1) Ações orçamentárias:
+                    #    primeira coluna parece código (ex: "6112 123H")
+                    #    última coluna parece valor em R$
+                    possible_code = row[0].strip() if len(row) > 0 else ""
+                    possible_val  = row[-1].strip() if len(row) > 0 else ""
+                    has_code = re.match(r"^\d{3,4}", possible_code) is not None
+                    has_money = (
+                        re.search(r"\d", possible_val) is not None
+                        and _parse_money(possible_val) > 0
+                    )
+
+                    if has_code and has_money and len(row) >= 2:
+                        desc = row[1].strip()
+                        current_block["acoes"].append({
+                            "acao": possible_code,
+                            "desc": desc,
+                            "valor": _parse_money(possible_val),
+                        })
+                        continue
+
+                    # 2) Totais: "TOTAL - FISCAL   325.799.445"
+                    m_total = TOTAL_REGEX.search(joined)
+                    if m_total and len(row) >= 2:
+                        tipo_total = m_total.group(1).upper()
+                        raw_val = row[-1]
+                        current_block["totais"][tipo_total] = _parse_money(raw_val)
+                        continue
+
+        # terminou as tabelas desse blob: salva o último bloco aberto
         if current_block:
-            # 1) Linhas de ação orçamentária:
-            #    primeira coluna começa com dígitos (ex: "6112 123G")
-            #    última coluna parece dinheiro
-            possible_code = row[0].strip() if len(row) > 0 else ""
-            possible_val = row[-1].strip() if len(row) > 0 else ""
-            has_code = re.match(r"^\d{3,4}", possible_code) is not None
-            has_money = re.search(r"\d", possible_val) and _parse_money(possible_val) > 0
+            blocks.append(current_block)
 
-            if has_code and has_money and len(row) >= 2:
-                desc = row[1].strip()
-                current_block["acoes"].append({
-                    "acao": possible_code,
-                    "desc": desc,
-                    "valor": _parse_money(possible_val),
-                })
-                continue
-
-            # 2) Totais tipo "TOTAL - FISCAL", "TOTAL - SEGURIDADE", "TOTAL - GERAL"
-            m_total = re.search(
-                r"TOTAL\s*-\s*(FISCAL|SEGURIDADE|GERAL)",
-                joined,
-                flags=re.IGNORECASE,
-            )
-            if m_total and len(row) >= 2:
-                tipo_total = m_total.group(1).upper()
-                raw_val = row[-1]
-                current_block["totais"][tipo_total] = _parse_money(raw_val)
-                continue
-
-    # salvar último bloco aberto
-    if current_block:
-        blocks.append(current_block)
-
-    # Agora filtrar só blocos que importam pra gente:
+    # ---------------------------
+    # 3. Filtrar só blocos Defesa/Marinha
+    # ---------------------------
     mb_blocks = []
     for b in blocks:
-        # se órgão menciona Defesa
-        if b["orgao"] and "DEFESA" in b["orgao"].upper():
+        orgao_ok = (
+            b["orgao"]
+            and (
+                "DEFESA" in b["orgao"].upper()
+                or "52000" in b["orgao"]
+            )
+        )
+        uo_ok = (b["uo_code"] in MB_UOS)
+
+        if orgao_ok or uo_ok:
             mb_blocks.append(b)
-            continue
-        # ou se a UO é uma da lista MB_UOS
-        if b["uo_code"] in MB_UOS:
-            mb_blocks.append(b)
-            continue
 
     if not mb_blocks:
-        # fallback: não achamos blocos claramente ligados à MB/Defesa
         return (
             "Publicação orçamentária do MPO potencialmente relevante, "
-            "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa "
-            "nos anexos."
+            "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa nos anexos."
         )
 
-    # Agrupamos por UO para montar um texto compacto pro WhatsApp
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    # ---------------------------
+    # 4. Agrupar por UO e montar texto estilo WhatsApp
+    # ---------------------------
+    grouped = {}
     for b in mb_blocks:
-        uo_key = f"{b['uo_code']} - {b['uo_name']}" if b["uo_code"] else (b["orgao"] or "Órgão não identificado")
+        if b["uo_code"] and b["uo_name"]:
+            uo_key = f"{b['uo_code']} - {b['uo_name']}"
+        elif b["orgao"]:
+            uo_key = b["orgao"]
+        else:
+            uo_key = "Unidade não identificada"
+
         grouped.setdefault(uo_key, []).append(b)
 
-    out_lines: List[str] = []
+    out_lines = []
     out_lines.append(
         "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:\n"
     )
 
-    for uo_key, lista_blocos in grouped.items():
-        # Ex.: "52131 - Comando da Marinha"
-        pretty_name = uo_key
-        # tenta usar nome 'bonito' se existir em MB_UOS
-        uo_code_match = re.match(r"^(\d{5})", uo_key)
-        if uo_code_match:
-            code = uo_code_match.group(1)
+    for uo_key, lista in grouped.items():
+        # se a UO estiver em MB_UOS, troca o nome pelo apelido oficial que você definiu
+        nice_key = uo_key
+        m_code = re.match(r"^(\d{5})", uo_key)
+        if m_code:
+            code = m_code.group(1)
             if code in MB_UOS:
-                pretty_name = f"{code} - {MB_UOS[code]}"
+                nice_key = f"{code} - {MB_UOS[code]}"
 
-        out_lines.append(f"*{pretty_name}*")
-
-        for b in lista_blocos:
+        out_lines.append(f"*{nice_key}*")
+        for b in lista:
             tipo_legenda = (
                 "Suplementação (ACRÉSCIMO)"
                 if b["tipo"] == "ACRÉSCIMO"
@@ -411,16 +502,16 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             )
 
             total_fiscal = b["totais"].get("FISCAL", 0)
-            total_geral = b["totais"].get("GERAL", 0)
+            total_geral  = b["totais"].get("GERAL", 0)
+            total_base = total_fiscal if total_fiscal else total_geral
 
-            if total_fiscal or total_geral:
-                total_show = total_fiscal if total_fiscal else total_geral
-                val_fmt = f"R$ {total_show:,}".replace(",", ".")
+            if total_base:
+                val_fmt = f"R$ {total_base:,}".replace(",", ".")
                 out_lines.append(f"  - {tipo_legenda}: {val_fmt}")
             else:
                 out_lines.append(f"  - {tipo_legenda} (valores por ação abaixo)")
 
-            # listar ações principais (limita pra não explodir mensagem)
+            # listar até 6 ações relevantes
             for acao in b["acoes"][:6]:
                 val_fmt = f"R$ {acao['valor']:,}".replace(",", ".")
                 desc_curta = acao["desc"]
@@ -428,9 +519,10 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
                     f"    • {acao['acao']} {desc_curta} — {val_fmt}"
                 )
 
-        out_lines.append("")  # linha em branco entre UOs
+        out_lines.append("")
 
     return "\n".join(out_lines).strip()
+
 
 # =====================================================================================
 # CLASSIFICAÇÃO INICIAL (SEM IA)
@@ -450,7 +542,7 @@ def process_grouped_materia(
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
 
-    # Ignorar FAB/Exército pra não poluir
+    # Ignorar conteúdos que são claramente só FAB ou Exército
     if (
         "comando da aeronáutica" in organ_lower
         or "comando do exército" in organ_lower
@@ -458,21 +550,33 @@ def process_grouped_materia(
         return None
 
     section = (main_article.get("pubName", "") or "").upper()
+
     body = main_article.find("body")
     if not body:
         return None
 
-    act_type = norm(body.find("Identifica").get_text(strip=True) if body.find("Identifica") else "")
+    act_type = norm(
+        body.find("Identifica").get_text(strip=True)
+        if body.find("Identifica")
+        else ""
+    )
     if not act_type:
         return None
 
-    summary = norm(body.find("Ementa").get_text(strip=True) if body.find("Ementa") else "")
+    summary = norm(
+        body.find("Ementa").get_text(strip=True)
+        if body.find("Ementa")
+        else ""
+    )
+
     display_text = norm(body.get_text(strip=True))
 
+    # fallback pra ementa
     if not summary:
-        # fallback ementa
         match = re.search(
-            r"EMENTA:(.*?)(Vistos|ACORDAM)", display_text, re.DOTALL | re.I
+            r"EMENTA:(.*?)(Vistos|ACORDAM)",
+            display_text,
+            re.DOTALL | re.I,
         )
         if match:
             summary = norm(match.group(1))
@@ -490,7 +594,7 @@ def process_grouped_materia(
         is_mpo = MPO_ORG_STRING in organ_lower
 
         if is_mpo:
-            # checar se a portaria cita códigos de interesse Marinha/Defesa
+            # Checa se esta portaria toca UOs da MB
             found_navy_codes = [
                 code for code in MPO_NAVY_TAGS
                 if code.lower() in search_content_lower
@@ -498,6 +602,7 @@ def process_grouped_materia(
 
             if found_navy_codes:
                 is_relevant = True
+
                 # heurística de impacto direto
                 found_specific = [c for c in found_navy_codes if c != "52000"]
                 found_defesa = "52000" in found_navy_codes
@@ -510,7 +615,6 @@ def process_grouped_materia(
 
                 summary_lower = summary.lower()
 
-                # gatilhos que caracterizam o tipo de ato MPO
                 gatilho_gnd = (
                     "grupo de natureza da despesa" in summary_lower
                     or "grupos de natureza da despesa" in summary_lower
@@ -551,17 +655,16 @@ def process_grouped_materia(
                     or "crédito suplementar no valor de" in summary_lower
                 )
 
+                # NOVO: sempre tenta extrair valores reais pra MPO relevante
                 if gatilho_gnd or gatilho_lme or gatilho_fonte or gatilho_credito:
-                    # NOVO: sempre tenta extrair valores reais da tabela MPO
                     reason = parse_mpo_budget_table(full_text_content)
                 else:
-                    # MPO + códigos da MB detectados mas não bateu nenhum gatilho esperado
                     reason = (
                         ANNOTATION_POSITIVE_GENERIC
                         or "Publicação potencialmente relevante para a Marinha. Recomenda-se análise detalhada."
                     )
 
-            # MPO mas sem códigos MB
+            # É MPO mas não achou códigos MB/Defesa
             elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 reason = (
@@ -569,8 +672,8 @@ def process_grouped_materia(
                     or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
                 )
 
-        # não é MPO, mas pode ser Marinha direta (Ex.: EMA, DPC, DHN etc)
         else:
+            # Não é MPO, mas pode ter Marinha direta (EMA, DPC, DHN etc.)
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
                     is_relevant = True
@@ -585,9 +688,11 @@ def process_grouped_materia(
         for tag in soup_copy.find_all("p", class_=["assina", "cargo"]):
             tag.decompose()
 
-        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
+        clean_search_content_lower = norm(
+            soup_copy.get_text(strip=True)
+        ).lower()
 
-        # 1) termos institucionais
+        # 1) termos institucionais rastreados
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
                 is_relevant = True
@@ -664,7 +769,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
 
-    # warm-up (tenta abrir base, ignora erro)
+    # warm-up
     try:
         await client.get(INLABS_BASE)
     except Exception:
@@ -686,7 +791,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     """
-    Depois do login, acha a pasta/listagem da data desejada e retorna URL base.
+    Depois do login, acha a pasta da data desejada e retorna URL base.
     """
     r = await client.get(INLABS_BASE)
     r.raise_for_status()
@@ -764,8 +869,7 @@ async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
 
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     """
-    Lê um ZIP em memória e retorna todos os XMLs
-    (cada XML é um pedaço de uma mesma idMateria ou de matérias diferentes).
+    Lê um ZIP em memória e retorna todos os XMLs (cada XML é um pedaço de uma matéria).
     """
     xml_blobs: List[bytes] = []
 
@@ -791,9 +895,9 @@ async def processar_inlabs(
 ):
     """
     Pipeline 'rápida', sem IA.
-    - Login na InLabs
+    - Login no InLabs
     - Baixa ZIPs do dia e extrai XML
-    - Agrupa cada idMateria
+    - Agrupa fragmentos por idMateria
     - process_grouped_materia decide relevância e reason
     - Gera WhatsApp final
     """
@@ -804,7 +908,7 @@ async def processar_inlabs(
         else ["DO1"]
     )
 
-    # Keywords personalizadas do formulário
+    # Keywords personalizadas
     custom_keywords: List[str] = []
     if keywords_json:
         try:
@@ -834,7 +938,7 @@ async def processar_inlabs(
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
 
-        # agrupar por materia_id
+        # Agrupar por idMateria
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_xml_blobs:
             try:
@@ -880,7 +984,7 @@ async def processar_inlabs(
                 if publication:
                     pubs.append(publication)
 
-        # deduplicar publicações parecidas
+        # Deduplicar publicações parecidas
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -918,10 +1022,10 @@ async def get_ai_analysis(
 ) -> Optional[str]:
     """
     Chama Gemini pra gerar UMA frase curta de impacto.
-    Retorno pode ser:
+    Retornos possíveis:
       - string normal
-      - "Erro na análise de IA: ..." (erro leve)
-      - None (mudo/bloqueado)
+      - "Erro na análise de IA: ..." (erro recuperável)
+      - None (modelo não quis responder)
     """
 
     try:
@@ -943,7 +1047,7 @@ async def get_ai_analysis(
                 return None
 
         except ValueError as e:
-            # bloqueio de segurança/harm
+            # tipicamente bloqueio de segurança
             print(f"Bloco de IA (ValueError): {e}")
             return None
         except Exception as e_inner:
@@ -973,9 +1077,9 @@ async def processar_inlabs_ia(
 ):
     """
     Pipeline com IA:
-    - Roda todo o fluxo de /processar-inlabs
-    - Depois chama Gemini para gerar uma frase curta por item
-    - Protege casos MPO com impacto direto na Marinha (is_mpo_navy_hit)
+    - faz todo o fluxo de /processar-inlabs
+    - depois chama Gemini pra uma frase curta por item
+    - protege MPO com impacto direto na Marinha (is_mpo_navy_hit)
     """
 
     if not GEMINI_API_KEY:
@@ -1117,7 +1221,7 @@ async def processar_inlabs_ia(
                 continue
 
             if ai_out is None:
-                # IA ficou muda, mantém reason original (parse_mpo_budget_table etc.)
+                # IA ficou muda, mantém reason original (que já pode ter vindo do parser MPO)
                 pubs_finais.append(p)
                 continue
 
@@ -1136,20 +1240,20 @@ async def processar_inlabs_ia(
                         p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
                         pubs_finais.append(p)
                     elif MPO_ORG_STRING in (p.organ or "").lower():
-                        # é MPO mas sem hit direto -> pode aceitar "sem impacto direto"
+                        # é MPO mas sem hit direto -> ok aceitar o 'sem impacto direto'
                         p.relevance_reason = ai_out
                         pubs_finais.append(p)
                     else:
-                        # não é MPO e IA falou "sem impacto": filtra fora (reduz ruído)
+                        # se não é MPO e IA falou que é irrelevante -> filtra fora
                         pass
                     continue
 
-                # caso normal: IA deu uma frase curta útil
+                # caso feliz: IA deu uma frase útil
                 p.relevance_reason = ai_out
                 pubs_finais.append(p)
                 continue
 
-            # fallback inesperado
+            # fallback
             pubs_finais.append(p)
 
         texto = monta_whatsapp(pubs_finais, data)
