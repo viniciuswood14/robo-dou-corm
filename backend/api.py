@@ -250,19 +250,16 @@ def _parse_money(raw: str) -> int:
 
 def parse_mpo_budget_table(full_text_content: str) -> str:
     """
-    Lê todas as tabelas da(s) matérias MPO, identifica blocos
-    por ÓRGÃO e UNIDADE, foca nas UOs da MB/Defesa e monta
-    um resumo com ACRÉSCIMO (suplementação) / REDUÇÃO (cancelamento),
-    ações e totais por UO.
-
-    Retorna string pronto pra WhatsApp.
+    Versão reforçada:
+    - regex mais flexível pra ÓRGÃO / UNIDADE (aceita 'ÓRGÃO SUPERIOR:', 'UNIDADE ORÇAMENTÁRIA:' etc.)
+    - detecta blocos '(ACRÉSCIMO)' ou '(REDUÇÃO)' mesmo que não venha exatamente 'PROGRAMA DE TRABALHO (...)'
+    - tenta extrair totais 'TOTAL - FISCAL' / 'TOTAL - GERAL'
+    - agrupa por UO (52131, 52931 etc) e monta mensagem estilo WhatsApp
     """
 
-    # Muitos anexos vêm bem-formados em XML/HTML, mas alguns trechos vêm
-    # com tags que 'lxml-xml' não gosta. "html.parser" é mais tolerante.
     soup = BeautifulSoup(full_text_content, "html.parser")
 
-    # Vamos linearizar todas as linhas de todas as tabelas:
+    # normaliza todas as tabelas em linhas
     all_rows = []
     for table in soup.find_all("table"):
         for tr in table.find_all("tr"):
@@ -270,11 +267,11 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             if any(col for col in cols):
                 all_rows.append(cols)
 
-    blocks = []  # cada block = { orgao, uo_code, uo_name, tipo, acoes[], totais{} }
+    blocks = []  # {orgao, uo_code, uo_name, tipo, acoes[], totais{}}
     current_orgao = None
     current_uo_code = None
     current_uo_name = None
-    current_tipo = None  # "ACRÉSCIMO" ou "REDUÇÃO"
+    current_tipo = None   # "ACRÉSCIMO" ou "REDUÇÃO"
     current_block = None
 
     def start_new_block():
@@ -282,58 +279,79 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             "orgao": current_orgao,
             "uo_code": current_uo_code,
             "uo_name": current_uo_name,
-            "tipo": current_tipo,  # "ACRÉSCIMO"/"REDUÇÃO"
-            "acoes": [],  # [{acao, desc, valor(int)}]
-            "totais": {},  # {"FISCAL": int, "SEGURIDADE": int, "GERAL": int}
+            "tipo": current_tipo,
+            "acoes": [],
+            "totais": {},
         }
+
+    # helpers de detecção mais tolerantes
+    ORGAO_REGEX = re.compile(
+        r"ÓRGÃO(?:\s+\w+)?\s*:\s*(\d+)\s*-\s*(.+)",
+        flags=re.IGNORECASE
+    )
+    UO_REGEX = re.compile(
+        r"(UNIDADE(?:\s+\w+)?|UNIDADE\s+ORÇAMENTÁRIA|UNIDADE\s+ORCAMENTARIA|UG)\s*:\s*(\d+)\s*-\s*(.+)",
+        flags=re.IGNORECASE,
+    )
+    BLOCO_TIPO_REGEX = re.compile(
+        r"\(\s*(ACRÉSCIMO|ACRESCIMO|REDUÇÃO|REDUCAO)\s*\)",
+        flags=re.IGNORECASE
+    )
+    TOTAL_REGEX = re.compile(
+        r"TOTAL\s*-\s*(FISCAL|SEGURIDADE|GERAL)",
+        flags=re.IGNORECASE
+    )
 
     for row in all_rows:
         joined = " ".join(row)
 
-        # Detecta ÓRGÃO (ex: "ÓRGÃO: 52000 - Ministério da Defesa")
-        m_org = re.search(r"ÓRGÃO:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
+        # 1) Detecta ÓRGÃO / ÓRGÃO SUPERIOR / ÓRGÃO VINCULADO...
+        m_org = ORGAO_REGEX.search(joined)
         if m_org:
-            current_orgao = f"{m_org.group(1).strip()} - {m_org.group(2).strip()}"
-            # ao trocar órgão, limpar contexto de UO/bloco
+            numero = m_org.group(1).strip()
+            nome = m_org.group(2).strip()
+            current_orgao = f"{numero} - {nome}"
+            # reset ao mudar órgão
             current_uo_code = None
             current_uo_name = None
             current_tipo = None
             current_block = None
             continue
 
-        # Detecta UNIDADE (ex: "UNIDADE: 52131 - Comando da Marinha")
-        m_uo = re.search(r"UNIDADE:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
+        # 2) Detecta UNIDADE / UNIDADE ORÇAMENTÁRIA / UG
+        m_uo = UO_REGEX.search(joined)
         if m_uo:
-            current_uo_code = m_uo.group(1).strip()
-            current_uo_name = m_uo.group(2).strip()
+            numero = m_uo.group(2).strip()
+            nome = m_uo.group(3).strip()
+            current_uo_code = numero
+            current_uo_name = nome
             current_tipo = None
             current_block = None
             continue
 
-        # Detecta início de bloco "PROGRAMA DE TRABALHO ( ACRÉSCIMO )" ou "( REDUÇÃO )"
-        m_tipo = re.search(
-            r"PROGRAMA DE TRABALHO\s*\(\s*(ACRÉSCIMO|REDUÇÃO)\s*\)",
-            joined,
-            flags=re.IGNORECASE,
-        )
+        # 3) Detecta início de bloco (ACRÉSCIMO)/(REDUÇÃO)
+        #    Alguns anexos escrevem "PROGRAMA DE TRABALHO ( ACRÉSCIMO )"
+        #    outros só têm uma linha "(ACRÉSCIMO)" isolado
+        m_tipo = BLOCO_TIPO_REGEX.search(joined)
         if m_tipo:
-            tipo_txt = m_tipo.group(1).upper()
-            # se havia bloco aberto, empurra pra lista
+            tipo_raw = m_tipo.group(1).upper()
             if current_block:
                 blocks.append(current_block)
-            current_tipo = "ACRÉSCIMO" if "ACR" in tipo_txt else "REDUÇÃO"
+            if "ACR" in tipo_raw:
+                current_tipo = "ACRÉSCIMO"
+            else:
+                current_tipo = "REDUÇÃO"
             current_block = start_new_block()
             continue
 
-        # Dentro de um bloco ativo: capturar ações e totais
+        # 4) Se estamos dentro de um bloco, tentar extrair ações e totais
         if current_block:
-            # 1) Linhas de ação orçamentária:
-            #    primeira coluna começa com dígitos (ex: "6112 123G")
-            #    última coluna parece dinheiro
+            # ação orçamentária (código + descrição + valor)
+            # heurística: primeira coluna começa com dígito, última coluna é numérica grande
             possible_code = row[0].strip() if len(row) > 0 else ""
             possible_val = row[-1].strip() if len(row) > 0 else ""
             has_code = re.match(r"^\d{3,4}", possible_code) is not None
-            has_money = re.search(r"\d", possible_val) and _parse_money(possible_val) > 0
+            has_money = (re.search(r"\d", possible_val) is not None and _parse_money(possible_val) > 0)
 
             if has_code and has_money and len(row) >= 2:
                 desc = row[1].strip()
@@ -344,93 +362,92 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
                 })
                 continue
 
-            # 2) Totais tipo "TOTAL - FISCAL", "TOTAL - SEGURIDADE", "TOTAL - GERAL"
-            m_total = re.search(
-                r"TOTAL\s*-\s*(FISCAL|SEGURIDADE|GERAL)",
-                joined,
-                flags=re.IGNORECASE,
-            )
+            # totais tipo "TOTAL - FISCAL   325.799.445"
+            m_total = TOTAL_REGEX.search(joined)
             if m_total and len(row) >= 2:
                 tipo_total = m_total.group(1).upper()
                 raw_val = row[-1]
                 current_block["totais"][tipo_total] = _parse_money(raw_val)
                 continue
 
-    # salvar último bloco aberto
+    # salva último bloco aberto
     if current_block:
         blocks.append(current_block)
 
-    # Agora filtrar só blocos que importam pra gente:
+    # 5) filtrar blocos relevantes p/ Marinha / Defesa
     mb_blocks = []
     for b in blocks:
-        # se órgão menciona Defesa
-        if b["orgao"] and "DEFESA" in b["orgao"].upper():
+        orgao_ok = (
+            b["orgao"]
+            and ("DEFESA" in b["orgao"].upper() or "52000" in b["orgao"])
+        )
+        uo_ok = (
+            b["uo_code"] in MB_UOS
+        )
+        if orgao_ok or uo_ok:
             mb_blocks.append(b)
-            continue
-        # ou se a UO é uma da lista MB_UOS
-        if b["uo_code"] in MB_UOS:
-            mb_blocks.append(b)
-            continue
 
     if not mb_blocks:
-        # fallback: não achamos blocos claramente ligados à MB/Defesa
+        # fallback de segurança
         return (
             "Publicação orçamentária do MPO potencialmente relevante, "
-            "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa "
-            "nos anexos."
+            "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa nos anexos."
         )
 
-    # Agrupamos por UO para montar um texto compacto pro WhatsApp
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    # 6) Agrupamento por UO (ex.: '52131 - Comando da Marinha')
+    grouped = {}
     for b in mb_blocks:
-        uo_key = f"{b['uo_code']} - {b['uo_name']}" if b["uo_code"] else (b["orgao"] or "Órgão não identificado")
+        if b["uo_code"] and b["uo_name"]:
+            uo_key = f"{b['uo_code']} - {b['uo_name']}"
+        elif b["orgao"]:
+            uo_key = b["orgao"]
+        else:
+            uo_key = "Unidade não identificada"
+
         grouped.setdefault(uo_key, []).append(b)
 
-    out_lines: List[str] = []
+    # 7) Montar saída WhatsApp
+    out_lines = []
     out_lines.append(
         "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:\n"
     )
 
-    for uo_key, lista_blocos in grouped.items():
-        # Ex.: "52131 - Comando da Marinha"
-        pretty_name = uo_key
-        # tenta usar nome 'bonito' se existir em MB_UOS
-        uo_code_match = re.match(r"^(\d{5})", uo_key)
-        if uo_code_match:
-            code = uo_code_match.group(1)
+    for uo_key, lista in grouped.items():
+        # tenta substituir nome por apelido conhecido (MB_UOS)
+        nice_key = uo_key
+        m_code = re.match(r"^(\d{5})", uo_key)
+        if m_code:
+            code = m_code.group(1)
             if code in MB_UOS:
-                pretty_name = f"{code} - {MB_UOS[code]}"
+                nice_key = f"{code} - {MB_UOS[code]}"
 
-        out_lines.append(f"*{pretty_name}*")
-
-        for b in lista_blocos:
+        out_lines.append(f"*{nice_key}*")
+        for b in lista:
             tipo_legenda = (
-                "Suplementação (ACRÉSCIMO)"
-                if b["tipo"] == "ACRÉSCIMO"
+                "Suplementação (ACRÉSCIMO)" if b["tipo"] == "ACRÉSCIMO"
                 else "Cancelamento (REDUÇÃO)"
             )
 
             total_fiscal = b["totais"].get("FISCAL", 0)
-            total_geral = b["totais"].get("GERAL", 0)
+            total_geral  = b["totais"].get("GERAL", 0)
+            total_base = total_fiscal if total_fiscal else total_geral
 
-            if total_fiscal or total_geral:
-                total_show = total_fiscal if total_fiscal else total_geral
-                val_fmt = f"R$ {total_show:,}".replace(",", ".")
+            if total_base:
+                val_fmt = f"R$ {total_base:,}".replace(",", ".")
                 out_lines.append(f"  - {tipo_legenda}: {val_fmt}")
             else:
                 out_lines.append(f"  - {tipo_legenda} (valores por ação abaixo)")
 
-            # listar ações principais (limita pra não explodir mensagem)
+            # listar até 6 ações principais
             for acao in b["acoes"][:6]:
                 val_fmt = f"R$ {acao['valor']:,}".replace(",", ".")
                 desc_curta = acao["desc"]
-                out_lines.append(
-                    f"    • {acao['acao']} {desc_curta} — {val_fmt}"
-                )
+                out_lines.append(f"    • {acao['acao']} {desc_curta} — {val_fmt}")
 
-        out_lines.append("")  # linha em branco entre UOs
+        out_lines.append("")
 
     return "\n".join(out_lines).strip()
+
 
 # =====================================================================================
 # CLASSIFICAÇÃO INICIAL (SEM IA)
