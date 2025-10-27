@@ -12,19 +12,20 @@ from bs4 import BeautifulSoup
 
 # IA / Gemini
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
 
 # =====================================================================================
-# Robô DOU API - versão 13.9.2 (baseada na sua 13.9.1)
-# Mudanças:
-# - Corrige .UPPER() -> .upper() e parsing de GND
-# - Gatilhos MPO mais abrangentes (Fonte / GND / LME / Crédito Suplementar)
-# - Remove duplicação de process_grouped_materia
-# - Mantém seu fluxo de login InLabs, zip, IA, WhatsApp
+# Robô DOU API - versão 13.9.3
+#
+# Diferenças vs 13.9.2:
+# - Nova função parse_mpo_budget_table() extrai valores reais (ações, totais R$)
+#   das tabelas das Portarias MPO (crédito suplementar, fonte, GND, LME etc.).
+# - process_grouped_materia agora chama parse_mpo_budget_table para todos atos MPO
+#   de interesse (não só "alteração de GND"), então some os placeholders vazios.
+# - Restante da estrutura permanece igual (login InLabs, prompts IA, etc.).
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU API (INLABS XML) - v13.9.2 (fix GND / MPO tagging / IA prompt)"
+    title="Robô DOU API (INLABS XML) - v13.9.3 (MPO parser valores Marinha)"
 )
 
 app.add_middleware(
@@ -47,7 +48,7 @@ except FileNotFoundError:
 except json.JSONDecodeError:
     raise RuntimeError("Erro: Falha ao decodificar 'config.json'. Verifique a sintaxe.")
 
-# Credenciais InLabs (Render injeta via env, mas se não tiver usa config.json)
+# Credenciais / URLs InLabs
 INLABS_BASE = os.getenv(
     "INLABS_BASE", config.get("INLABS_BASE", "https://inlabs.in.gov.br")
 )
@@ -62,14 +63,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", config.get("GEMINI_API_KEY", None))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Constantes vindas do config.json
+# Constantes auxiliares
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
 TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
 ANNOTATION_POSITIVE_GENERIC = config.get("ANNOTATION_POSITIVE_GENERIC", "")
 ANNOTATION_NEGATIVE = config.get("ANNOTATION_NEGATIVE", "")
 
-MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})
+MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})  # códigos UO -> nome
 KEYWORDS_DIRECT_INTEREST_S1 = config.get("KEYWORDS_DIRECT_INTEREST_S1", [])
 BUDGET_KEYWORDS_S1 = config.get("BUDGET_KEYWORDS_S1", [])
 MPO_ORG_STRING = config.get(
@@ -81,11 +82,7 @@ NAMES_TO_TRACK = sorted(
     list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower
 )
 
-# -------------------------------------------------------------------------------------
 # PROMPTS IA
-# -------------------------------------------------------------------------------------
-
-# prompt geral
 GEMINI_MASTER_PROMPT = """
 Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
 Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
@@ -107,7 +104,6 @@ Responda só a frase final, sem rodeio adicional.
 TEXTO DA PUBLICAÇÃO:
 """
 
-# prompt especial pra MPO com impacto direto
 GEMINI_MPO_PROMPT = """
 Você é analista orçamentário da Marinha do Brasil. A publicação abaixo é do Ministério do Planejamento e Orçamento (MPO) e JÁ FOI CLASSIFICADA como tendo impacto direto em dotações ligadas à Marinha (ex.: Fundo Naval, Comando da Marinha, etc.).
 
@@ -134,7 +130,7 @@ class Publicacao(BaseModel):
     relevance_reason: Optional[str] = None
     section: Optional[str] = None
     clean_text: Optional[str] = None
-    is_mpo_navy_hit: bool = False  # chave para o prompt da IA
+    is_mpo_navy_hit: bool = False  # chave pro prompt da IA
 
 
 class ProcessResponse(BaseModel):
@@ -144,7 +140,7 @@ class ProcessResponse(BaseModel):
     whatsapp_text: str
 
 # =====================================================================================
-# FUNÇÕES AUXILIARES
+# HELPERS GERAIS
 # =====================================================================================
 
 _ws = re.compile(r"\s+")
@@ -153,11 +149,7 @@ def norm(s: Optional[str]) -> str:
         return ""
     return _ws.sub(" ", s).strip()
 
-
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    """
-    Monta o texto final estilo WhatsApp, agrupando por seção.
-    """
     meses_pt = {
         1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
         5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
@@ -175,7 +167,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
     lines.append("")
 
-    # agrupar por seção (DO1, DO2 etc)
+    # agrupar publicações por seção DO1/DO2/etc
     pubs_by_section: Dict[str, List[Publicacao]] = {}
     for p in pubs:
         sec = p.section or "DOU"
@@ -202,7 +194,6 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
 
-            # tratamento de avisos de erro IA
             if (
                 reason.startswith("Erro na análise de IA:")
                 or reason.startswith("Erro GRAVE")
@@ -226,113 +217,223 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     return "\n".join(lines)
 
 # =====================================================================================
-# PARSER DE GND / TABELAS MPO
+# PARSER MPO (tabelas de suplementação / redução / totais por UO)
 # =====================================================================================
 
-def parse_gnd_change_table(full_text_content: str) -> str:
+MB_UOS = {
+    "52131": "Comando da Marinha",
+    "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
+    "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
+    "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
+    "52931": "Fundo Naval",
+    "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
+    "52000": "Ministério da Defesa",  # Defesa inteira (pode incluir MB indiretamente)
+}
+
+def _clean_text_local(t: str) -> str:
+    if t is None:
+        return ""
+    return re.sub(r"\s+", " ", t).strip()
+
+def _parse_money(raw: str) -> int:
+    raw = _clean_text_local(raw)
+    if not raw:
+        return 0
+    raw = raw.replace(".", "").replace(",", "")
+    m = re.findall(r"\d+", raw)
+    if not m:
+        return 0
+    try:
+        return int("".join(m))
+    except:
+        return 0
+
+def parse_mpo_budget_table(full_text_content: str) -> str:
     """
-    Lê as tabelas anexas das portarias orçamentárias do MPO
-    e tenta extrair acréscimos/reduções especificamente
-    quando a unidade é ligada à MB (códigos em MPO_NAVY_TAGS).
+    Lê todas as tabelas da(s) matérias MPO, identifica blocos
+    por ÓRGÃO e UNIDADE, foca nas UOs da MB/Defesa e monta
+    um resumo com ACRÉSCIMO (suplementação) / REDUÇÃO (cancelamento),
+    ações e totais por UO.
+
+    Retorna string pronto pra WhatsApp.
     """
 
-    soup = BeautifulSoup(full_text_content, "lxml-xml")
+    # Muitos anexos vêm bem-formados em XML/HTML, mas alguns trechos vêm
+    # com tags que 'lxml-xml' não gosta. "html.parser" é mais tolerante.
+    soup = BeautifulSoup(full_text_content, "html.parser")
 
-    results = {"acrescimo": [], "reducao": []}
-    current_unidade = None
-    current_operation = None
-
+    # Vamos linearizar todas as linhas de todas as tabelas:
+    all_rows = []
     for table in soup.find_all("table"):
-        for row in table.find_all("tr"):
-            cols = row.find_all("td")
-            row_text_cells = [norm(c.get_text()) for c in cols]
-            row_full_text = " ".join(row_text_cells)
+        for tr in table.find_all("tr"):
+            cols = [_clean_text_local(td.get_text(" ")) for td in tr.find_all(["td", "th"])]
+            if any(col for col in cols):
+                all_rows.append(cols)
 
-            # Detecta UNIDADE:
-            if "UNIDADE:" in row_full_text:
-                current_unidade = row_full_text.replace("UNIDADE:", "").strip()
+    blocks = []  # cada block = { orgao, uo_code, uo_name, tipo, acoes[], totais{} }
+    current_orgao = None
+    current_uo_code = None
+    current_uo_name = None
+    current_tipo = None  # "ACRÉSCIMO" ou "REDUÇÃO"
+    current_block = None
+
+    def start_new_block():
+        return {
+            "orgao": current_orgao,
+            "uo_code": current_uo_code,
+            "uo_name": current_uo_name,
+            "tipo": current_tipo,  # "ACRÉSCIMO"/"REDUÇÃO"
+            "acoes": [],  # [{acao, desc, valor(int)}]
+            "totais": {},  # {"FISCAL": int, "SEGURIDADE": int, "GERAL": int}
+        }
+
+    for row in all_rows:
+        joined = " ".join(row)
+
+        # Detecta ÓRGÃO (ex: "ÓRGÃO: 52000 - Ministério da Defesa")
+        m_org = re.search(r"ÓRGÃO:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
+        if m_org:
+            current_orgao = f"{m_org.group(1).strip()} - {m_org.group(2).strip()}"
+            # ao trocar órgão, limpar contexto de UO/bloco
+            current_uo_code = None
+            current_uo_name = None
+            current_tipo = None
+            current_block = None
+            continue
+
+        # Detecta UNIDADE (ex: "UNIDADE: 52131 - Comando da Marinha")
+        m_uo = re.search(r"UNIDADE:\s*(\d+)\s*-\s*(.+)", joined, flags=re.IGNORECASE)
+        if m_uo:
+            current_uo_code = m_uo.group(1).strip()
+            current_uo_name = m_uo.group(2).strip()
+            current_tipo = None
+            current_block = None
+            continue
+
+        # Detecta início de bloco "PROGRAMA DE TRABALHO ( ACRÉSCIMO )" ou "( REDUÇÃO )"
+        m_tipo = re.search(
+            r"PROGRAMA DE TRABALHO\s*\(\s*(ACRÉSCIMO|REDUÇÃO)\s*\)",
+            joined,
+            flags=re.IGNORECASE,
+        )
+        if m_tipo:
+            tipo_txt = m_tipo.group(1).upper()
+            # se havia bloco aberto, empurra pra lista
+            if current_block:
+                blocks.append(current_block)
+            current_tipo = "ACRÉSCIMO" if "ACR" in tipo_txt else "REDUÇÃO"
+            current_block = start_new_block()
+            continue
+
+        # Dentro de um bloco ativo: capturar ações e totais
+        if current_block:
+            # 1) Linhas de ação orçamentária:
+            #    primeira coluna começa com dígitos (ex: "6112 123G")
+            #    última coluna parece dinheiro
+            possible_code = row[0].strip() if len(row) > 0 else ""
+            possible_val = row[-1].strip() if len(row) > 0 else ""
+            has_code = re.match(r"^\d{3,4}", possible_code) is not None
+            has_money = re.search(r"\d", possible_val) and _parse_money(possible_val) > 0
+
+            if has_code and has_money and len(row) >= 2:
+                desc = row[1].strip()
+                current_block["acoes"].append({
+                    "acao": possible_code,
+                    "desc": desc,
+                    "valor": _parse_money(possible_val),
+                })
                 continue
 
-            # Detecta bloco atual: ACRÉSCIMO / REDUÇÃO / CANCELAMENTO
-            if "PROGRAMA DE TRABALHO" in row_full_text:
-                upper_line = row_full_text.upper()
-                if "ACRÉSCIMO" in upper_line:
-                    current_operation = "acrescimo"
-                elif "REDUÇÃO" in upper_line or "CANCELAMENTO" in upper_line:
-                    current_operation = "reducao"
-                else:
-                    current_operation = None
+            # 2) Totais tipo "TOTAL - FISCAL", "TOTAL - SEGURIDADE", "TOTAL - GERAL"
+            m_total = re.search(
+                r"TOTAL\s*-\s*(FISCAL|SEGURIDADE|GERAL)",
+                joined,
+                flags=re.IGNORECASE,
+            )
+            if m_total and len(row) >= 2:
+                tipo_total = m_total.group(1).upper()
+                raw_val = row[-1]
+                current_block["totais"][tipo_total] = _parse_money(raw_val)
                 continue
 
-            # Linhas efetivas de dotação costumam ter ~10 colunas e não conter "PROGRAMÁTICA"
-            if len(cols) != 10 or "PROGRAMÁTICA" in row_full_text.upper():
-                continue
+    # salvar último bloco aberto
+    if current_block:
+        blocks.append(current_block)
 
-            # Só registra se:
-            #  - já temos a unidade
-            #  - já sabemos se é acréscimo ou redução
-            #  - a unidade é da Marinha (checa códigos tipo 52131, 52931...)
-            if (
-                current_unidade
-                and current_operation
-                and any(tag in current_unidade for tag in MPO_NAVY_TAGS.keys())
-            ):
-                try:
-                    ao, desc, _, _, gnd, _, _, _, _, valor = row_text_cells
-                except ValueError:
-                    # Estrutura inesperada na linha
-                    continue
+    # Agora filtrar só blocos que importam pra gente:
+    mb_blocks = []
+    for b in blocks:
+        # se órgão menciona Defesa
+        if b["orgao"] and "DEFESA" in b["orgao"].upper():
+            mb_blocks.append(b)
+            continue
+        # ou se a UO é uma da lista MB_UOS
+        if b["uo_code"] in MB_UOS:
+            mb_blocks.append(b)
+            continue
 
-                if not valor:
-                    continue
-
-                clean_gnd = (
-                    gnd.replace("-", "")
-                    .replace("ODC", "")
-                    .replace("INV", "")
-                    .strip()
-                )
-
-                line = f"- AO {ao} - {desc} | GND: {clean_gnd} | Valor: {valor}"
-                results[current_operation].append((current_unidade, line))
-
-    # Se não coletou nada utilizável:
-    if not results["acrescimo"] and not results["reducao"]:
+    if not mb_blocks:
+        # fallback: não achamos blocos claramente ligados à MB/Defesa
         return (
-            "Ato orçamentário do MPO potencialmente envolvendo Defesa/Marinha. "
-            "Recomenda-se análise manual dos anexos para confirmar acréscimos, reduções, ações e valores."
+            "Publicação orçamentária do MPO potencialmente relevante, "
+            "mas não foi possível extrair valores específicos das UOs da Marinha/Defesa "
+            "nos anexos."
         )
 
-    out_lines = [
-        "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados relevantes extraídos:"
-    ]
+    # Agrupamos por UO para montar um texto compacto pro WhatsApp
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for b in mb_blocks:
+        uo_key = f"{b['uo_code']} - {b['uo_name']}" if b["uo_code"] else (b["orgao"] or "Órgão não identificado")
+        grouped.setdefault(uo_key, []).append(b)
 
-    # Acréscimos (suplementação)
-    if results["acrescimo"]:
-        out_lines.append("\n**-- ACRÉSCIMOS (Suplementação) --**")
-        last_unidade = None
-        for unidade, line in sorted(results["acrescimo"]):
-            if unidade != last_unidade:
-                unidade_code = unidade.split(" ")[0]
-                out_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*")
-                last_unidade = unidade
-            out_lines.append(line)
+    out_lines: List[str] = []
+    out_lines.append(
+        "Ato orçamentário do MPO com impacto na Defesa/Marinha. Dados extraídos automaticamente:\n"
+    )
 
-    # Reduções / cancelamentos
-    if results["reducao"]:
-        out_lines.append("\n**-- REDUÇÕES (Cancelamento) --**")
-        last_unidade = None
-        for unidade, line in sorted(results["reducao"]):
-            if unidade != last_unidade:
-                unidade_code = unidade.split(" ")[0]
-                out_lines.append(f"*{MPO_NAVY_TAGS.get(unidade_code, unidade)}*")
-                last_unidade = unidade
-            out_lines.append(line)
+    for uo_key, lista_blocos in grouped.items():
+        # Ex.: "52131 - Comando da Marinha"
+        pretty_name = uo_key
+        # tenta usar nome 'bonito' se existir em MB_UOS
+        uo_code_match = re.match(r"^(\d{5})", uo_key)
+        if uo_code_match:
+            code = uo_code_match.group(1)
+            if code in MB_UOS:
+                pretty_name = f"{code} - {MB_UOS[code]}"
 
-    return "\n".join(out_lines)
+        out_lines.append(f"*{pretty_name}*")
+
+        for b in lista_blocos:
+            tipo_legenda = (
+                "Suplementação (ACRÉSCIMO)"
+                if b["tipo"] == "ACRÉSCIMO"
+                else "Cancelamento (REDUÇÃO)"
+            )
+
+            total_fiscal = b["totais"].get("FISCAL", 0)
+            total_geral = b["totais"].get("GERAL", 0)
+
+            if total_fiscal or total_geral:
+                total_show = total_fiscal if total_fiscal else total_geral
+                val_fmt = f"R$ {total_show:,}".replace(",", ".")
+                out_lines.append(f"  - {tipo_legenda}: {val_fmt}")
+            else:
+                out_lines.append(f"  - {tipo_legenda} (valores por ação abaixo)")
+
+            # listar ações principais (limita pra não explodir mensagem)
+            for acao in b["acoes"][:6]:
+                val_fmt = f"R$ {acao['valor']:,}".replace(",", ".")
+                desc_curta = acao["desc"]
+                out_lines.append(
+                    f"    • {acao['acao']} {desc_curta} — {val_fmt}"
+                )
+
+        out_lines.append("")  # linha em branco entre UOs
+
+    return "\n".join(out_lines).strip()
 
 # =====================================================================================
-# CLASSIFICAÇÃO INICIAL (SEM IA) - process_grouped_materia
+# CLASSIFICAÇÃO INICIAL (SEM IA)
 # =====================================================================================
 
 def process_grouped_materia(
@@ -341,17 +442,15 @@ def process_grouped_materia(
     custom_keywords: List[str],
 ) -> Optional[Publicacao]:
     """
-    1. Avalia se a matéria é de interesse.
-    2. Gera uma análise inicial (reason).
-    3. Seta a flag is_mpo_navy_hit se for MPO e atingir códigos da MB.
-    Essa saída é usada tanto no /processar-inlabs (sem IA) quanto
-    como insumo para /processar-inlabs-ia (com IA).
+    1. Decide se a matéria é relevante.
+    2. Gera reason inicial (sem IA ou pré-IA).
+    3. Marca is_mpo_navy_hit pra proteger relevância na IA.
     """
 
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
 
-    # Ignorar FAB/Exército pra não sujar relatório
+    # Ignorar FAB/Exército pra não poluir
     if (
         "comando da aeronáutica" in organ_lower
         or "comando do exército" in organ_lower
@@ -359,29 +458,19 @@ def process_grouped_materia(
         return None
 
     section = (main_article.get("pubName", "") or "").upper()
-
     body = main_article.find("body")
     if not body:
         return None
 
-    act_type = norm(
-        body.find("Identifica").get_text(strip=True)
-        if body.find("Identifica")
-        else ""
-    )
+    act_type = norm(body.find("Identifica").get_text(strip=True) if body.find("Identifica") else "")
     if not act_type:
         return None
 
-    summary = norm(
-        body.find("Ementa").get_text(strip=True)
-        if body.find("Ementa")
-        else ""
-    )
-
+    summary = norm(body.find("Ementa").get_text(strip=True) if body.find("Ementa") else "")
     display_text = norm(body.get_text(strip=True))
 
     if not summary:
-        # fallback: tenta achar "EMENTA:" manualmente
+        # fallback ementa
         match = re.search(
             r"EMENTA:(.*?)(Vistos|ACORDAM)", display_text, re.DOTALL | re.I
         )
@@ -394,28 +483,24 @@ def process_grouped_materia(
     clean_text_for_ia = ""
     is_mpo_navy_hit_flag = False
 
-    # -------------------------------------------------
-    # SEÇÃO 1 (DO1): atos normativos / portarias / MPO
-    # -------------------------------------------------
+    # ---------------------
+    # SEÇÃO 1 (DO1)
+    # ---------------------
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ_lower
 
         if is_mpo:
-            # procurar códigos específicos da Marinha/Defesa nos anexos/texto
+            # checar se a portaria cita códigos de interesse Marinha/Defesa
             found_navy_codes = [
-                code
-                for code in MPO_NAVY_TAGS
+                code for code in MPO_NAVY_TAGS
                 if code.lower() in search_content_lower
             ]
 
             if found_navy_codes:
                 is_relevant = True
-
-                # separar código 52000 (Defesa genérica) de códigos claramente Marinha
+                # heurística de impacto direto
                 found_specific = [c for c in found_navy_codes if c != "52000"]
                 found_defesa = "52000" in found_navy_codes
-
-                # heurística de impacto direto
                 if found_specific:
                     is_mpo_navy_hit_flag = True
                 elif found_defesa and found_specific:
@@ -423,11 +508,10 @@ def process_grouped_materia(
                 else:
                     is_mpo_navy_hit_flag = False
 
-                # classificar o tipo de ato MPO com gatilhos mais soltos
                 summary_lower = summary.lower()
 
-                # 1) Alteração de GND / natureza de despesa / adequação de GND
-                if (
+                # gatilhos que caracterizam o tipo de ato MPO
+                gatilho_gnd = (
                     "grupo de natureza da despesa" in summary_lower
                     or "grupos de natureza da despesa" in summary_lower
                     or "gnd" in summary_lower
@@ -435,25 +519,17 @@ def process_grouped_materia(
                     or "altera parcialmente grupos" in summary_lower
                     or "adequa os grupos de natureza" in summary_lower
                     or "adequa os grupos de natureza da despesa" in summary_lower
-                ):
-                    reason = parse_gnd_change_table(full_text_content)
+                )
 
-                # 2) Limite de Movimentação e Empenho (LME)
-                elif (
+                gatilho_lme = (
                     "limites de movimentação e empenho" in summary_lower
                     or "limite de movimentação e empenho" in summary_lower
                     or "ajusta os limites de movimentação e empenho" in summary_lower
                     or "antecipa os limites de movimentação e empenho" in summary_lower
                     or "lme" in summary_lower
-                ):
-                    reason = TEMPLATE_LME or (
-                        "Portaria do MPO ajusta/antecipa os Limites de Movimentação "
-                        "e Empenho, afetando dotações discricionárias, possivelmente "
-                        "incluindo Defesa/Marinha."
-                    )
+                )
 
-                # 3) Alteração/Modificação de Fonte de Recurso
-                elif (
+                gatilho_fonte = (
                     "fonte de recursos" in summary_lower
                     or "fontes de recursos" in summary_lower
                     or "reclassificação de fonte" in summary_lower
@@ -461,14 +537,9 @@ def process_grouped_materia(
                     or "modifica fontes de recursos" in summary_lower
                     or "alteração de fonte" in summary_lower
                     or "identificador de resultado primário" in summary_lower
-                ):
-                    reason = TEMPLATE_FONTE or (
-                        "Portaria do MPO modifica fonte de recursos / resultado primário "
-                        "em dotações que alcançam Defesa/Marinha."
-                    )
+                )
 
-                # 4) Crédito suplementar / reforço de dotação
-                elif (
+                gatilho_credito = (
                     "abre crédito suplementar" in summary_lower
                     or "crédito suplementar" in summary_lower
                     or "abre aos orçamentos fiscal" in summary_lower
@@ -478,29 +549,27 @@ def process_grouped_materia(
                     or "suplementação de crédito" in summary_lower
                     or "suplementação de dotações" in summary_lower
                     or "crédito suplementar no valor de" in summary_lower
-                ):
-                    reason = TEMPLATE_CREDITO or (
-                        "Portaria do MPO abre crédito suplementar / reforça dotação "
-                        "que pode atingir UOs da Defesa/Marinha."
-                    )
-
-                else:
-                    # MPO + códigos MB detectados, mas não bateu nenhum padrão acima
-                    reason = (
-                        ANNOTATION_POSITIVE_GENERIC
-                        or "Publicação potencialmente relevante para a Marinha. "
-                           "Recomenda-se análise detalhada."
-                    )
-
-            # MPO mas sem códigos MB nos anexos
-            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
-                is_relevant = True
-                reason = ANNOTATION_NEGATIVE or (
-                    "Ato orçamentário do MPO, mas não foi possível confirmar impacto "
-                    "direto na Marinha com base no texto disponível."
                 )
 
-        # NÃO é MPO → ato normativo ou decisório da própria Marinha / Defesa
+                if gatilho_gnd or gatilho_lme or gatilho_fonte or gatilho_credito:
+                    # NOVO: sempre tenta extrair valores reais da tabela MPO
+                    reason = parse_mpo_budget_table(full_text_content)
+                else:
+                    # MPO + códigos da MB detectados mas não bateu nenhum gatilho esperado
+                    reason = (
+                        ANNOTATION_POSITIVE_GENERIC
+                        or "Publicação potencialmente relevante para a Marinha. Recomenda-se análise detalhada."
+                    )
+
+            # MPO mas sem códigos MB
+            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
+                is_relevant = True
+                reason = (
+                    ANNOTATION_NEGATIVE
+                    or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
+                )
+
+        # não é MPO, mas pode ser Marinha direta (Ex.: EMA, DPC, DHN etc)
         else:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
@@ -508,28 +577,24 @@ def process_grouped_materia(
                     reason = f"Há menção específica à TAG: '{kw}'."
                     break
 
-    # -------------------------------------------------
-    # SEÇÃO 2 (DO2): pessoal / movimentação de militares
-    # -------------------------------------------------
+    # ---------------------
+    # SEÇÃO 2 (DO2) - pessoal
+    # ---------------------
     elif "DO2" in section:
         soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
-
-        # removendo assinaturas, para não confundir a análise de cargo/autoridade
         for tag in soup_copy.find_all("p", class_=["assina", "cargo"]):
             tag.decompose()
 
-        clean_search_content_lower = norm(
-            soup_copy.get_text(strip=True)
-        ).lower()
+        clean_search_content_lower = norm(soup_copy.get_text(strip=True)).lower()
 
-        # 1) termos institucionais ("Comando da Marinha", "Autoridade Marítima", etc.)
+        # 1) termos institucionais
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
                 is_relevant = True
                 reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
                 break
 
-        # 2) nome rastreado + verbo de ação (nomeação, exoneração etc.)
+        # 2) nome rastreado + verbo de ação
         if not is_relevant:
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
@@ -545,9 +610,9 @@ def process_grouped_materia(
                 if is_relevant:
                     break
 
-    # -------------------------------------------------
-    # KEYWORDS CUSTOM do usuário (parâmetro keywords_json)
-    # -------------------------------------------------
+    # ---------------------
+    # Palavras-chave personalizadas
+    # ---------------------
     found_custom_kw = None
     custom_reason_text = None
     if custom_keywords:
@@ -566,9 +631,9 @@ def process_grouped_materia(
         elif (not reason) or reason == ANNOTATION_NEGATIVE:
             reason = custom_reason_text
 
-    # -------------------------------------------------
-    # Se for relevante, monta Publicacao
-    # -------------------------------------------------
+    # ---------------------
+    # Monta Publicacao se relevante
+    # ---------------------
     if is_relevant:
         soup_full_clean = BeautifulSoup(full_text_content, "lxml-xml")
         clean_text_for_ia = norm(soup_full_clean.get_text(strip=True))
@@ -587,7 +652,7 @@ def process_grouped_materia(
     return None
 
 # =====================================================================================
-# CLIENTE INLABS / DOWNLOAD ZIP
+# INLABS / DOWNLOAD ZIP
 # =====================================================================================
 
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
@@ -599,7 +664,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
     client = httpx.AsyncClient(timeout=60, follow_redirects=True)
 
-    # warm-up
+    # warm-up (tenta abrir base, ignora erro)
     try:
         await client.get(INLABS_BASE)
     except Exception:
@@ -621,7 +686,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
 
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     """
-    Após login, encontra o índice da data desejada e retorna a URL-base dessa data.
+    Depois do login, acha a pasta/listagem da data desejada e retorna URL base.
     """
     r = await client.get(INLABS_BASE)
     r.raise_for_status()
@@ -641,7 +706,7 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
         if any(c.lower() in hay for c in cand_texts):
             return urljoin(INLABS_BASE.rstrip("/") + "/", href.lstrip("/"))
 
-    # fallback: tenta montar diretório `${BASE}/${date}/`
+    # fallback: tenta {BASE}/{date}/
     fallback_url = f"{INLABS_BASE.rstrip('/')}/{date}/"
     rr = await client.get(fallback_url)
     if rr.status_code == 200:
@@ -654,7 +719,6 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
 
 
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
-    """Pega o HTML da listagem de arquivos da data."""
     base_url = await resolve_date_url(client, date)
     r = await client.get(base_url)
     if r.status_code >= 400:
@@ -671,7 +735,7 @@ def pick_zip_links_from_listing(
     only_sections: List[str],
 ) -> List[str]:
     """
-    Acha os .zip relevantes (DO1, DO2, etc.) na listagem HTML daquela data.
+    Seleciona os .zip relevantes (DO1, DO2, etc.) naquela data.
     """
     soup = BeautifulSoup(html, "html.parser")
     links: List[str] = []
@@ -700,7 +764,8 @@ async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
 
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     """
-    Lê um ZIP em memória e devolve todos os XMLs internos.
+    Lê um ZIP em memória e retorna todos os XMLs
+    (cada XML é um pedaço de uma mesma idMateria ou de matérias diferentes).
     """
     xml_blobs: List[bytes] = []
 
@@ -712,7 +777,7 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     return xml_blobs
 
 # =====================================================================================
-# ENDPOINT /processar-inlabs (SEM IA)
+# /processar-inlabs (SEM IA)
 # =====================================================================================
 
 @app.post("/processar-inlabs", response_model=ProcessResponse)
@@ -725,12 +790,12 @@ async def processar_inlabs(
     ),
 ):
     """
-    Estágio 1:
-    - autentica na InLabs
-    - baixa ZIPs do dia
-    - junta os XML por materia_id
-    - roda process_grouped_materia
-    - gera whatsapp_text SEM IA
+    Pipeline 'rápida', sem IA.
+    - Login na InLabs
+    - Baixa ZIPs do dia e extrai XML
+    - Agrupa cada idMateria
+    - process_grouped_materia decide relevância e reason
+    - Gera WhatsApp final
     """
 
     secs = (
@@ -739,7 +804,7 @@ async def processar_inlabs(
         else ["DO1"]
     )
 
-    # keywords custom do usuário
+    # Keywords personalizadas do formulário
     custom_keywords: List[str] = []
     if keywords_json:
         try:
@@ -764,13 +829,12 @@ async def processar_inlabs(
                 detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.",
             )
 
-        # baixa todos os ZIPs listados e extrai XML
         all_xml_blobs = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
 
-        # agrupa XMLs por materia_id
+        # agrupar por materia_id
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_xml_blobs:
             try:
@@ -816,7 +880,7 @@ async def processar_inlabs(
                 if publication:
                     pubs.append(publication)
 
-        # Deduplicar publicações parecidas (mesmo órgão/ato/ementa)
+        # deduplicar publicações parecidas
         seen: Set[str] = set()
         merged: List[Publicacao] = []
         for p in pubs:
@@ -853,11 +917,11 @@ async def get_ai_analysis(
     prompt_template: str = GEMINI_MASTER_PROMPT,
 ) -> Optional[str]:
     """
-    Chama Gemini e retorna UMA frase.
-    Pode retornar:
-    - string normal
-    - "Erro na análise de IA: ..." (erro leve)
-    - None (bloqueio/vazio)
+    Chama Gemini pra gerar UMA frase curta de impacto.
+    Retorno pode ser:
+      - string normal
+      - "Erro na análise de IA: ..." (erro leve)
+      - None (mudo/bloqueado)
     """
 
     try:
@@ -879,25 +943,24 @@ async def get_ai_analysis(
                 return None
 
         except ValueError as e:
+            # bloqueio de segurança/harm
             print(f"Bloco de IA (ValueError): {e}")
             return None
         except Exception as e_inner:
             print(f"Erro inesperado ao processar resposta da IA: {e_inner}")
-            return (
-                "Erro processando resposta IA: " + str(e_inner)[:50]
-            )
+            return "Erro processando resposta IA: " + str(e_inner)[:50]
 
     except Exception as e:
         print(f"Erro na API do Gemini: {e}")
-        error_msg = str(e).lower()
-        if "quota" in error_msg:
+        msg = str(e).lower()
+        if "quota" in msg:
             return "Erro na análise de IA: Cota de uso da API excedida."
-        if "api_key" in error_msg:
+        if "api_key" in msg:
             return "Erro na análise de IA: Chave de API inválida."
         return "Erro na análise de IA: " + str(e)[:100]
 
 # =====================================================================================
-# ENDPOINT /processar-inlabs-ia (COM IA)
+# /processar-inlabs-ia (COM IA)
 # =====================================================================================
 
 @app.post("/processar-inlabs-ia", response_model=ProcessResponse)
@@ -909,10 +972,10 @@ async def processar_inlabs_ia(
     ),
 ):
     """
-    Estágio 1 + IA:
-    - Mesma coleta de /processar-inlabs
-    - Depois roda a IA pra gerar uma frase curta por item
-    - Aplica regra de proteção (se é MPO com impacto direto, a IA não pode dizer 'sem impacto direto')
+    Pipeline com IA:
+    - Roda todo o fluxo de /processar-inlabs
+    - Depois chama Gemini para gerar uma frase curta por item
+    - Protege casos MPO com impacto direto na Marinha (is_mpo_navy_hit)
     """
 
     if not GEMINI_API_KEY:
@@ -935,7 +998,6 @@ async def processar_inlabs_ia(
         else ["DO1"]
     )
 
-    # keywords custom
     custom_keywords: List[str] = []
     if keywords_json:
         try:
@@ -962,13 +1024,11 @@ async def processar_inlabs_ia(
                 detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.",
             )
 
-        # baixa os ZIPs e extrai XML
         all_xml_blobs = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
 
-        # agrupar por materia_id
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_xml_blobs:
             try:
@@ -1002,7 +1062,7 @@ async def processar_inlabs_ia(
             except Exception:
                 continue
 
-        # estágio 1 (regra)
+        # Estágio 1 (regra fixa)
         for materia_id, content in materias.items():
             if content["main_article"]:
                 publication = process_grouped_materia(
@@ -1013,7 +1073,7 @@ async def processar_inlabs_ia(
                 if publication:
                     pubs_filtradas.append(publication)
 
-        # merge duplicados
+        # Dedup
         seen: Set[str] = set()
         merged_pubs: List[Publicacao] = []
         for p in pubs_filtradas:
@@ -1028,7 +1088,7 @@ async def processar_inlabs_ia(
                 seen.add(key)
                 merged_pubs.append(p)
 
-        # estágio 2 (IA)
+        # Estágio 2 (IA)
         tasks = []
         for p in merged_pubs:
             prompt_to_use = GEMINI_MASTER_PROMPT
@@ -1038,7 +1098,6 @@ async def processar_inlabs_ia(
             if p.clean_text:
                 tasks.append(get_ai_analysis(p.clean_text, model, prompt_to_use))
             else:
-                # fallback raro
                 tasks.append(
                     get_ai_analysis(
                         p.relevance_reason or "Texto não disponível",
@@ -1052,49 +1111,45 @@ async def processar_inlabs_ia(
         pubs_finais: List[Publicacao] = []
 
         for p, ai_out in zip(merged_pubs, ai_results):
-            # vários casos possíveis de retorno
             if isinstance(ai_out, Exception):
                 p.relevance_reason = f"Erro GRAVE na análise de IA: {ai_out}"
                 pubs_finais.append(p)
                 continue
 
             if ai_out is None:
-                # IA ficou muda → mantém razão S1
+                # IA ficou muda, mantém reason original (parse_mpo_budget_table etc.)
                 pubs_finais.append(p)
                 continue
 
             if isinstance(ai_out, str):
-                # IA retornou texto
                 lower_ai = ai_out.lower()
 
-                # caso erro leve: "Erro na análise de IA: ... "
                 if ai_out.startswith("Erro na análise de IA:"):
                     p.relevance_reason = ai_out
                     pubs_finais.append(p)
                     continue
 
-                # caso IA diga "sem impacto direto"
+                # IA disse "sem impacto direto"
                 if "sem impacto direto" in lower_ai:
                     if p.is_mpo_navy_hit:
-                        # IA contradisse o marcador de impacto direto
+                        # a IA quis minimizar mas a gente já sabe que impacta MB
                         p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
                         pubs_finais.append(p)
                     elif MPO_ORG_STRING in (p.organ or "").lower():
-                        # MPO mas sem tag MB explícita → pode aceitar "sem impacto direto"
+                        # é MPO mas sem hit direto -> pode aceitar "sem impacto direto"
                         p.relevance_reason = ai_out
                         pubs_finais.append(p)
                     else:
-                        # não é MPO e IA falou "sem impacto": descarta do relatório final
-                        # (isso reduz ruído)
+                        # não é MPO e IA falou "sem impacto": filtra fora (reduz ruído)
                         pass
                     continue
 
-                # caso normal (frase útil)
+                # caso normal: IA deu uma frase curta útil
                 p.relevance_reason = ai_out
                 pubs_finais.append(p)
                 continue
 
-            # fallback inesperado: mantém razão original
+            # fallback inesperado
             pubs_finais.append(p)
 
         texto = monta_whatsapp(pubs_finais, data)
@@ -1110,16 +1165,15 @@ async def processar_inlabs_ia(
         await client.aclose()
 
 # =====================================================================================
-# HELLO / HEALTHCHECK
+# HEALTHCHECK
 # =====================================================================================
 
 @app.get("/")
 async def root():
     return {"status": "ok", "ts": datetime.now().isoformat()}
 
-
 # =====================================================================================
-# TESTE RÁPIDO DA IA
+# TESTE IA
 # =====================================================================================
 
 @app.get("/test-ia")
@@ -1143,7 +1197,6 @@ async def test_ia_endpoint():
 
     try:
         response = await model.generate_content_async(test_prompt)
-
         try:
             analysis = norm(response.text)
             if analysis:
@@ -1151,15 +1204,10 @@ async def test_ia_endpoint():
                 return {"result": f"Teste OK! IA respondeu: '{analysis}'"}
             else:
                 print("[TESTE IA] Falhou: resposta vazia")
-                return {
-                    "result": "Teste FALHOU. Resposta vazia da IA."
-                }
-
+                return {"result": "Teste FALHOU. Resposta vazia da IA."}
         except ValueError as e:
             print(f"[TESTE IA] Falhou (ValueError): {e}")
-            return {
-                "result": f"Teste FALHOU. A IA bloqueou a resposta: {e}"
-            }
+            return {"result": f"Teste FALHOU. A IA bloqueou a resposta: {e}"}
         except Exception as e_inner:
             print(f"[TESTE IA] Falhou (parse): {e_inner}")
             return {
