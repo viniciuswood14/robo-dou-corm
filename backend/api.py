@@ -118,14 +118,9 @@ Sua tarefa é:
 3. Se houver reforço de dotação ou acréscimo, deixe isso claro como positivo. Se houver cancelamento/redução, diga isso também.
 4. Entregar apenas UMA frase curta (máximo 2 linhas) para WhatsApp.
 
-IMPORTANTE:
-Se a publicação criar, alterar ou regulamentar regras de uso de recursos financeiros de fundos públicos da União, fundos setoriais, fundos vinculados ou superávit financeiro desses fundos — mesmo sem citar explicitamente a Marinha do Brasil, Fundo Naval, FDEPM, ou UGs específicas — classifique como "impacto indireto orçamentário" e explique por que isso pode abrir espaço fiscal ou afetar a capacidade de financiar projetos da Marinha (por exemplo, uso de superávit financeiro de fundos para projetos estratégicos, transformação ecológica, infraestrutura marítima, etc.).
-
-NUNCA invente números. Só mencione valores (percentuais, montantes em R$ etc.) se eles estiverem literalmente informados no texto analisado. Se não houver valor explícito, escreva "sem valores numéricos explícitos".
-
 Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi marcada como relevante para a MB.
 
-Você NÃO pode responder a Secao 2. Mantenha a resposta recebida pela TAG manual. 
+TEXTO DA PUBLICAÇÃO:
 """
 
 # =====================================================================================
@@ -1335,4 +1330,4 @@ async def test_ia_endpoint():
         raise HTTPException(
             status_code=500,
             detail=f"Teste FALHOU. Erro na chamada da API: {detail}",
-        )
+
