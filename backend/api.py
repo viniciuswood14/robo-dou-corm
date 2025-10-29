@@ -1283,12 +1283,18 @@ async def root():
 
 @app.get("/test-ia")
 async def test_ia_endpoint():
+    """
+    Endpoint simples para testar se a IA está operando.
+    - Retorna 500 se não tiver GEMINI_API_KEY ou se o modelo não inicializar.
+    - Retorna 200 com a resposta da IA (ou mensagem de falha controlada).
+    """
     if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
             detail="GEMINI_API_KEY não configurada.",
         )
 
+    # tenta criar o modelo
     try:
         model = genai.GenerativeModel("gemini-2.5-pro")
     except Exception as e:
@@ -1297,38 +1303,55 @@ async def test_ia_endpoint():
             detail=f"Falha ao inicializar modelo IA: {e}",
         )
 
-    test_prompt = "Qual a capital do Brasil?"
+    test_prompt = "Qual é a capital do Brasil?"
     print(f"[TESTE IA] Pergunta: {test_prompt}")
 
     try:
         response = await model.generate_content_async(test_prompt)
+
         try:
             analysis = norm(response.text)
             if analysis:
                 print(f"[TESTE IA] OK: {analysis}")
-                return {"result": f"Teste OK! IA respondeu: '{analysis}'"}
+                return {
+                    "result": f"Teste OK! IA respondeu: '{analysis}'",
+                    "ts": datetime.now().isoformat(),
+                }
             else:
+                # IA respondeu vazio (bloqueio de segurança, etc.)
                 print("[TESTE IA] Falhou: resposta vazia")
-                return {"result": "Teste FALHOU. Resposta vazia da IA."}
+                return {
+                    "result": "Teste FALHOU. Resposta vazia da IA.",
+                    "ts": datetime.now().isoformat(),
+                }
+
         except ValueError as e:
+            # normalmente: bloqueio de segurança de conteúdo
             print(f"[TESTE IA] Falhou (ValueError): {e}")
-            return {"result": f"Teste FALHOU. A IA bloqueou a resposta: {e}"}
+            return {
+                "result": "Teste FALHOU. A IA bloqueou a resposta.",
+                "detail": str(e),
+                "ts": datetime.now().isoformat(),
+            }
+
         except Exception as e_inner:
             print(f"[TESTE IA] Falhou (parse): {e_inner}")
             return {
-                "result": "Teste FALHOU. Erro processando resposta IA: "
-                + str(e_inner)[:50]
+                "result": "Teste FALHOU. Erro processando resposta da IA.",
+                "detail": str(e_inner)[:200],
+                "ts": datetime.now().isoformat(),
             }
 
     except Exception as e:
+        # erro direto na chamada da API do Gemini
         print(f"[TESTE IA] Falhou (API): {e}")
-        msg = str(e).lower()
-        detail = str(e)[:100]
-        if "quota" in msg:
+        detail = str(e)[:200]
+        lower_msg = str(e).lower()
+        if "quota" in lower_msg:
             detail = "Cota de uso da API excedida."
-        elif "api_key" in msg:
+        elif "api_key" in lower_msg:
             detail = "Chave de API inválida."
         raise HTTPException(
             status_code=500,
             detail=f"Teste FALHOU. Erro na chamada da API: {detail}",
-
+        )
