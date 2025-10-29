@@ -28,6 +28,8 @@
     "empresa gerencial de projetos navais",
     "fundo de desenvolvimento do ensino profissional marítimo",
     "programa nuclear brasileiro"
+    "projeto estrategico"
+    "projetos estrategicos"
   ],
   "BUDGET_KEYWORDS_S1": [
     "crédito suplementar",
@@ -43,7 +45,13 @@
     "fontes de recursos",
     "movimentação e empenho",
     "classificação orçamentária",
-    "gestão fiscal"
+    "gestão fiscal",
+    "superávit financeiro",
+"fundos públicos",
+"fonte de recursos vinculados",
+"superavit financeiro",
+"fundo público",
+
   ],
   "PERSONNEL_ACTION_VERBS": [
     "nomear",
