@@ -1090,7 +1090,7 @@ async def processar_inlabs_ia(
         )
 
     try:
-        model = genai.GenerativeModel("gemini-2.5-pro")
+        model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
         raise HTTPException(
             status_code=500,
