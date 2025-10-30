@@ -101,7 +101,7 @@ Critérios de Análise:
     "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
     "52000": "Ministério da Defesa")?
 2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
-3.  Se for ato de pessoal (Seção 2), nao precisa analisar com IA, somente responder com o texto do filtro, mencionando a TAG identificada. 
+3.  Se for ato de pessoal (Seção 2), nao precisa analisar com IA, somente responder com o texto do filtro, mencionando a TAG identificada e o nome da pessoa identificada. 
 4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas listado numa reunião, ou 'Marinha' no nome de uma empresa privada), responda APENAS: "Sem impacto direto."
 5.  Nunca alucinar ou inventar numeros. 
 
@@ -117,8 +117,8 @@ Sua tarefa é:
 1. Dizer claramente qual o efeito orçamentário: crédito suplementar (reforço de dotação), alteração de GND (reclassificação da natureza da despesa), mudança de fonte de recursos, antecipação/ajuste de LME etc.
 2. Dizer quem é afetado (Ex.: Comando da Marinha, Fundo Naval, Defesa/52000).
 3. Se houver reforço de dotação ou acréscimo, deixe isso claro como positivo. Se houver cancelamento/redução, diga isso também.
-4. Se conseguir identificar os valores alterados, tambem mencionar. 
-4. Entregar apenas UMA frase curta (máximo 2 linhas) para WhatsApp.
+4. Se conseguir identificar os valores alterados, tambem mencionar, mas nunca alucione ou invente. 
+4. Entregar apenas UMA frase curta (máximo 3 linhas) para WhatsApp.
 
 Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi marcada como relevante para a MB.
 
