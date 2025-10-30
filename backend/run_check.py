@@ -277,7 +277,7 @@ async def main_loop():
         
         # 2. Definir o período de atividade (de 5:00h até 22:59h)
         hora_inicio = 5
-        hora_fim = 23 # Não irá rodar na hora 23 (11 PM)
+        hora_fim = 24 # Não irá rodar na hora 23 (11 PM)
         
         if hora_inicio <= hora_atual < hora_fim:
             # --- Dentro do horário de expediente ---
