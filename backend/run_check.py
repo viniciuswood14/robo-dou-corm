@@ -42,15 +42,11 @@ except ImportError as e:
     raise
 
 # --- CONFIGURAÇÃO DO ESTADO ---
-# Este caminho DEVE ser um Disco Persistente no Render
-# Ex: /dados/processed_state.json
 STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "/dados/processed_state.json")
 
 def load_state() -> Dict[str, List[str]]:
     """Carrega o estado (ZIPs processados) do disco."""
     try:
-        # Garante que o diretório exista (para o disco persistente)
-        # O os.path.dirname('/dados/arquivo.json') é '/dados'
         state_dir = os.path.dirname(STATE_FILE_PATH)
         if not os.path.exists(state_dir):
             os.makedirs(state_dir, exist_ok=True)
@@ -61,7 +57,7 @@ def load_state() -> Dict[str, List[str]]:
             
     except FileNotFoundError:
         print(f"Arquivo de estado não encontrado em {STATE_FILE_PATH}. Criando um novo.")
-        return {} # Se o arquivo não existe, começa do zero
+        return {} 
     except (json.JSONDecodeError, IsADirectoryError):
         print(f"Erro ao ler {STATE_FILE_PATH} (corrompido ou é um diretório). Resetando estado.")
         return {}
@@ -80,18 +76,15 @@ def save_state(state: Dict[str, List[str]]):
 
 # --- LÓGICA PRINCIPAL DO AGENDADOR ---
 
-async def check_and_process_dou():
+# ----------------------------------------------------------------------------------
+# ↓↓↓ MUDANÇA IMPORTANTE AQUI ↓↓↓
+# A função agora RECEBE a data de Brasília (today_str) como argumento
+# ----------------------------------------------------------------------------------
+async def check_and_process_dou(today_str: str):
     """
     Função principal de verificação.
-    1. Carrega o estado (ZIPs já processados).
-    2. Loga no INLABS e lista os ZIPs do dia.
-    3. Compara e descobre quais ZIPs são novos.
-    4. Se houver novos:
-        a. Baixa, extrai e processa (usando a IA).
-        b. Envia o relatório para o Telegram.
-        c. Atualiza o arquivo de estado.
     """
-    print(f"--- Iniciando verificação do DOU ---")
+    print(f"--- Iniciando verificação do DOU para a data: {today_str} ---")
     
     # 0. Configura a IA
     if not GEMINI_API_KEY:
@@ -99,24 +92,23 @@ async def check_and_process_dou():
         return
     genai.configure(api_key=GEMINI_API_KEY)
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash") # Use o modelo que preferir
+        model = genai.GenerativeModel("gemini-1.5-flash")
     except Exception as e:
         print(f"Falha ao inicializar o modelo de IA: {e}")
         return
 
-    # 1. Define a data e carrega o estado
-    today_str = datetime.now().strftime('%Y-%m-%d')
+    # 1. Carrega o estado
+    # (Não precisamos mais pegar a data aqui, ela veio como argumento)
     state = load_state()
     processed_zips_today = set(state.get(today_str, []))
     
     client = None
     try:
-        # 2. Loga e lista os ZIPs do dia
+        # 2. Loga e lista os ZIPs do dia (usando o today_str correto)
         client = await inlabs_login_and_get_session()
         listing_url = await resolve_date_url(client, today_str)
         html = await fetch_listing_html(client, today_str)
         
-        # Queremos verificar todas as seções por padrão
         all_zip_links = pick_zip_links_from_listing(html, listing_url, ["DO1", "DO2", "DO3"])
         
         if not all_zip_links:
@@ -147,6 +139,8 @@ async def check_and_process_dou():
             save_state(state)
             return
 
+        # ... (O resto da função continua igual) ...
+        
         # 4a. Agrupar XMLs por Matéria
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_new_xml_blobs:
@@ -175,7 +169,7 @@ async def check_and_process_dou():
                 publication = process_grouped_materia(
                     content["main_article"],
                     content["full_text"],
-                    custom_keywords=[] # Você pode adicionar keywords aqui se quiser
+                    custom_keywords=[] 
                 )
                 if publication:
                     pubs_filtradas.append(publication)
@@ -212,7 +206,6 @@ async def check_and_process_dou():
             if isinstance(ai_out, Exception):
                 p.relevance_reason = f"Erro GRAVE na análise de IA: {ai_out}"
             elif ai_out is None:
-                # IA ficou muda, mantém reason original
                 pass
             elif isinstance(ai_out, str):
                 lower_ai = ai_out.lower()
@@ -223,7 +216,6 @@ async def check_and_process_dou():
                 elif "sem impacto direto" not in lower_ai:
                     p.relevance_reason = ai_out
                 else:
-                    # IA disse "sem impacto" e não era hit MPO, filtra fora
                     continue
             
             pubs_finais.append(p)
@@ -236,7 +228,7 @@ async def check_and_process_dou():
 
         # 5. Gera o relatório e envia
         texto_whatsapp = monta_whatsapp(pubs_finais, today_str)
-        report_header = f"Alerta de novas publicações no DOU de {today_str} (detectadas às {datetime.now().strftime('%H:%M')}):\n\n"
+        report_header = f"Alerta de novas publicações no DOU de {today_str} (detectadas às {datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%H:%M')}):\n\n"
         
         await send_telegram_message(report_header + texto_whatsapp)
 
@@ -247,7 +239,6 @@ async def check_and_process_dou():
 
     except Exception as e:
         print(f"Erro inesperado no fluxo principal: {e}")
-        # Tenta enviar erro ao Telegram
         await send_telegram_message(f"Erro no Robô DOU: {e}")
         
     finally:
@@ -264,47 +255,44 @@ async def main_loop():
     horário agendado (5h às 23h de Brasília).
     """
     
-    # Define o fuso-horário de Brasília
     TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
     INTERVALO_SEGUNDOS = 30 * 60 # 30 minutos
     
     print("--- Iniciando Robô DOU em modo Background Worker (com horário agendado) ---")
 
     while True:
-        # 1. Obter a hora atual em Brasília
         agora_brasilia = datetime.now(TZ_BRASILIA)
-        hora_atual = agora_brasilia.hour # Pega a hora (0-23)
+        hora_atual = agora_brasilia.hour 
         
-        # 2. Definir o período de atividade (de 5:00h até 22:59h)
+        # Define o período de atividade
         hora_inicio = 5
-        hora_fim = 24 # Não irá rodar na hora 23 (11 PM)
+        hora_fim = 24 # TEMPORÁRIO PARA TESTAR (Voltar para 23)
         
         if hora_inicio <= hora_atual < hora_fim:
-            # --- Dentro do horário de expediente ---
             print(f"[{agora_brasilia.strftime('%Y-%m-%d %H:%M:%S')}] Horário comercial (Hora: {hora_atual}h). Iniciando verificação...")
             try:
-                # Roda a nossa lógica de verificação
-                await check_and_process_dou()
+                # ------------------------------------------------------------------
+                # ↓↓↓ MUDANÇA IMPORTANTE AQUI ↓↓↓
+                # Pegamos a data DE BRASÍLIA e passamos para a função
+                # ------------------------------------------------------------------
+                data_hoje_brasilia = agora_brasilia.strftime('%Y-%m-%d')
+                await check_and_process_dou(data_hoje_brasilia)
                 
             except Exception as e:
-                # Se algo der muito errado, loga o erro e tenta enviar ao Telegram
                 print(f"Erro CRÍTICO no loop principal: {e}")
                 try:
                     await send_telegram_message(f"Erro CRÍTICO no Robô DOU: {e}\nVou tentar rodar de novo em 30 min.")
                 except:
-                    pass # Se o telegram falhar, não há o que fazer
+                    pass
         else:
-            # --- Fora do horário de expediente ---
             print(f"[{agora_brasilia.strftime('%Y-%m-%d %H:%M:%S')}] Fora de expediente (Hora: {hora_atual}h). Pulando esta verificação.")
 
         
-        # 3. Dorme por 30 minutos (1800 segundos)
         print(f"--- Próxima checagem em 30 minutos... ---")
         await asyncio.sleep(INTERVALO_SEGUNDOS)
 
 
 if __name__ == "__main__":
-    # Inicia o loop principal
     try:
         asyncio.run(main_loop())
     except KeyboardInterrupt:
