@@ -101,7 +101,7 @@ Critérios de Análise:
     "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
     "52000": "Ministério da Defesa")?
 2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
-3.  Se for ato de pessoal (Seção 2), nao precisa analisar com IA, somente responder com o texto do filtro, mencionando a TAG identificada e o nome da pessoa identificada. 
+3.  Se for ato de pessoal (Seção 2), mencionar o nome da pessoa e qual atividade/ação a ela designada. Exemplo de resposta: JOÃO DA SILVA foi nomeado para o cargo de Assessor Técnico.
 4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas listado numa reunião, ou 'Marinha' no nome de uma empresa privada), responda APENAS: "Sem impacto direto."
 5.  Nunca alucinar ou inventar numeros. 
 
