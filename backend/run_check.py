@@ -3,48 +3,72 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
+from zoneinfo import ZoneInfo # Para checar o fuso-horário
 from typing import Dict, List, Any, Set
 from bs4 import BeautifulSoup
+
+# IA / Gemini
 import google.generativeai as genai
 
 # Importa as funções que JÁ CRIAMOS em api.py
-from api import (
-    inlabs_login_and_get_session,
-    resolve_date_url,
-    fetch_listing_html,
-    pick_zip_links_from_listing,
-    download_zip,
-    extract_xml_from_zip,
-    process_grouped_materia,
-    get_ai_analysis,
-    monta_whatsapp,
-    GEMINI_API_KEY,
-    GEMINI_MASTER_PROMPT,
-    GEMINI_MPO_PROMPT,
-    MPO_ORG_STRING,
-    Publicacao  # Importa o modelo Pydantic
-)
+try:
+    from api import (
+        inlabs_login_and_get_session,
+        resolve_date_url,
+        fetch_listing_html,
+        pick_zip_links_from_listing,
+        download_zip,
+        extract_xml_from_zip,
+        process_grouped_materia,
+        get_ai_analysis,
+        monta_whatsapp,
+        GEMINI_API_KEY,
+        GEMINI_MASTER_PROMPT,
+        GEMINI_MPO_PROMPT,
+        MPO_ORG_STRING,
+        Publicacao  # Importa o modelo Pydantic
+    )
+except ImportError as e:
+    print(f"Erro: Falha ao importar módulos do 'api.py'. Verifique o arquivo. Detalhe: {e}")
+    raise
 
 # Importa o novo sender do Telegram
-from telegram import send_telegram_message
+try:
+    from telegram import send_telegram_message
+except ImportError as e:
+    print(f"Erro: Falha ao importar 'telegram.py'. Verifique o arquivo. Detalhe: {e}")
+    raise
 
 # --- CONFIGURAÇÃO DO ESTADO ---
 # Este caminho DEVE ser um Disco Persistente no Render
 # Ex: /dados/processed_state.json
-STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "processed_state.json")
+STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "/dados/processed_state.json")
 
 def load_state() -> Dict[str, List[str]]:
     """Carrega o estado (ZIPs processados) do disco."""
     try:
         # Garante que o diretório exista (para o disco persistente)
-        os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
+        # O os.path.dirname('/dados/arquivo.json') é '/dados'
+        state_dir = os.path.dirname(STATE_FILE_PATH)
+        if not os.path.exists(state_dir):
+            os.makedirs(state_dir, exist_ok=True)
+            print(f"Diretório de estado criado em: {state_dir}")
         
         with open(STATE_FILE_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        # Se o arquivo não existe ou está corrompido, começa do zero
+            
+    except FileNotFoundError:
+        print(f"Arquivo de estado não encontrado em {STATE_FILE_PATH}. Criando um novo.")
+        return {} # Se o arquivo não existe, começa do zero
+    except (json.JSONDecodeError, IsADirectoryError):
+        print(f"Erro ao ler {STATE_FILE_PATH} (corrompido ou é um diretório). Resetando estado.")
         return {}
+    except Exception as e:
+        print(f"Erro inesperado ao carregar estado: {e}")
+        return {}
+
 
 def save_state(state: Dict[str, List[str]]):
     """Salva o estado atual no disco."""
@@ -58,7 +82,7 @@ def save_state(state: Dict[str, List[str]]):
 
 async def check_and_process_dou():
     """
-    Função principal do Cron Job.
+    Função principal de verificação.
     1. Carrega o estado (ZIPs já processados).
     2. Loga no INLABS e lista os ZIPs do dia.
     3. Compara e descobre quais ZIPs são novos.
@@ -67,7 +91,7 @@ async def check_and_process_dou():
         b. Envia o relatório para o Telegram.
         c. Atualiza o arquivo de estado.
     """
-    print(f"--- Iniciando verificação do DOU às {datetime.now()} ---")
+    print(f"--- Iniciando verificação do DOU ---")
     
     # 0. Configura a IA
     if not GEMINI_API_KEY:
@@ -118,14 +142,10 @@ async def check_and_process_dou():
             all_new_xml_blobs.extend(extract_xml_from_zip(zb))
 
         if not all_new_xml_blobs:
-            print("Os novos ZIPs estavam vazios ou não continham XMLs. Estranho.")
-            # Mesmo assim, marcamos como processados para não tentar de novo
+            print("Os novos ZIPs estavam vazios ou não continham XMLs.")
             state[today_str] = list(current_zip_set)
             save_state(state)
             return
-
-        # --- Reimplementação da lógica de `processar_inlabs_ia` ---
-        # (Isso é necessário porque seu script original é um endpoint monolítico)
 
         # 4a. Agrupar XMLs por Matéria
         materias: Dict[str, Dict[str, Any]] = {}
@@ -171,7 +191,6 @@ async def check_and_process_dou():
 
         if not merged_pubs:
             print("Novos ZIPs processados, mas nenhuma matéria relevante encontrada.")
-            # Atualiza o estado mesmo assim
             state[today_str] = list(current_zip_set)
             save_state(state)
             return
@@ -217,7 +236,6 @@ async def check_and_process_dou():
 
         # 5. Gera o relatório e envia
         texto_whatsapp = monta_whatsapp(pubs_finais, today_str)
-        # Adiciona um cabeçalho para indicar que é uma nova edição/atualização
         report_header = f"Alerta de novas publicações no DOU de {today_str} (detectadas às {datetime.now().strftime('%H:%M')}):\n\n"
         
         await send_telegram_message(report_header + texto_whatsapp)
@@ -235,8 +253,59 @@ async def check_and_process_dou():
     finally:
         if client:
             await client.aclose()
-        print(f"--- Verificação do DOU finalizada às {datetime.now()} ---")
+        print(f"--- Verificação do DOU finalizada ---")
+
+
+# --- LOOP PRINCIPAL (PARA BACKGROUND WORKER) ---
+
+async def main_loop():
+    """
+    Loop principal que roda como um Background Worker, mas com 
+    horário agendado (5h às 23h de Brasília).
+    """
+    
+    # Define o fuso-horário de Brasília
+    TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
+    INTERVALO_SEGUNDOS = 30 * 60 # 30 minutos
+    
+    print("--- Iniciando Robô DOU em modo Background Worker (com horário agendado) ---")
+
+    while True:
+        # 1. Obter a hora atual em Brasília
+        agora_brasilia = datetime.now(TZ_BRASILIA)
+        hora_atual = agora_brasilia.hour # Pega a hora (0-23)
+        
+        # 2. Definir o período de atividade (de 5:00h até 22:59h)
+        hora_inicio = 5
+        hora_fim = 23 # Não irá rodar na hora 23 (11 PM)
+        
+        if hora_inicio <= hora_atual < hora_fim:
+            # --- Dentro do horário de expediente ---
+            print(f"[{agora_brasilia.strftime('%Y-%m-%d %H:%M:%S')}] Horário comercial (Hora: {hora_atual}h). Iniciando verificação...")
+            try:
+                # Roda a nossa lógica de verificação
+                await check_and_process_dou()
+                
+            except Exception as e:
+                # Se algo der muito errado, loga o erro e tenta enviar ao Telegram
+                print(f"Erro CRÍTICO no loop principal: {e}")
+                try:
+                    await send_telegram_message(f"Erro CRÍTICO no Robô DOU: {e}\nVou tentar rodar de novo em 30 min.")
+                except:
+                    pass # Se o telegram falhar, não há o que fazer
+        else:
+            # --- Fora do horário de expediente ---
+            print(f"[{agora_brasilia.strftime('%Y-%m-%d %H:%M:%S')}] Fora de expediente (Hora: {hora_atual}h). Pulando esta verificação.")
+
+        
+        # 3. Dorme por 30 minutos (1800 segundos)
+        print(f"--- Próxima checagem em 30 minutos... ---")
+        await asyncio.sleep(INTERVALO_SEGUNDOS)
 
 
 if __name__ == "__main__":
-    asyncio.run(check_and_process_dou())
+    # Inicia o loop principal
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        print("\n--- Robô interrompido manualmente ---")
