@@ -118,7 +118,7 @@ Sua tarefa é:
 2. Dizer quem é afetado (Ex.: Comando da Marinha, Fundo Naval, Defesa/52000).
 3. Se houver reforço de dotação ou acréscimo, deixe isso claro como positivo. Se houver cancelamento/redução, diga isso também.
 4. Se conseguir identificar os valores alterados, tambem mencionar, mas nunca alucione ou invente. 
-4. Entregar um texto formal e coeso para WhatsApp.
+4. Entregar um texto formal para WhatsApp. Não omitir informações como nome e números.
 
 Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi marcada como relevante para a MB.
 
