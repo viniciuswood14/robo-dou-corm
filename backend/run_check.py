@@ -256,7 +256,7 @@ async def main_loop():
     """
     
     TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
-    INTERVALO_SEGUNDOS = 30 * 60 # 30 minutos
+    INTERVALO_SEGUNDOS = 10 * 60 # 30 minutos
     
     print("--- Iniciando Robô DOU em modo Background Worker (com horário agendado) ---")
 
