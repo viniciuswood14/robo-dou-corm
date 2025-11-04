@@ -1,41 +1,43 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Central de Monitoramento - CORM</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Central de Monitoramento - CORM</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico" sizes="64x64"> 
+Seta para cima
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="main-container">
-    <header class="card-header">
-      <img src="logo-marinha.png" alt="Logotipo da Marinha do Brasil" class="logo" />
-      <h1>Central de Monitoramento</h1>
-    </header>
+  <div class="main-container">
+    <header class="card-header">
+      <img src="logo-marinha.png" alt="Logotipo da Marinha do Brasil" class="logo" />
+      <h1>Central de Monitoramento</h1>
+    </header>
 
-    <main class="hub-grid">
-      <a href="robo-dou.html" class="hub-card">
-        <h2><span class="emoji">🤖</span> Robô do DOU</h2>
-        <p>Acessar a ferramenta para processar e analisar as publicações do Diário Oficial da União.</p>
-      </a>
-      <a href="https://valor.globo.com/impresso/" target="_blank" class="hub-card" id="valor-link">
-        <h2><span class="emoji">📰</span> Valor Econômico</h2>
-        <p>Acessar a edição impressa do dia para análise de notícias fiscais e de defesa. (Abre em nova aba)</p>
-      </a>
-      <a href="manual.html" class="hub-card">
-        <h2><span class="emoji">📖</span> Manual de Serviço</h2>
-        <p>Consultar os procedimentos e checklists para a análise diária do DOU e do Valor Econômico.</p>
-      </a>
-    </main>
-  </div>
-  <script>
-    // Script para atualizar o link do Valor Econômico para a data de hoje
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const valorLink = document.getElementById('valor-link');
-    valorLink.href = `https://valor.globo.com/impresso/${year}${month}${day}/`;
-  </script>
+    <main class="hub-grid">
+      <a href="robo-dou.html" class="hub-card">
+        <h2><span class="emoji">🤖</span> Robô do DOU</h2>
+        <p>Acessar a ferramenta para processar e analisar as publicações do Diário Oficial da União.</p>
+      </a>
+      <a href="https://valor.globo.com/impresso/" target="_blank" class="hub-card" id="valor-link">
+        <h2><span class="emoji">📰</span> Valor Econômico</h2>
+        <p>Acessar a edição impressa do dia para análise de notícias fiscais e de defesa. (Abre em nova aba)</p>
+      </a>
+      <a href="manual.html" class="hub-card">
+        <h2><span class="emoji">📖</span> Manual de Serviço</h2>
+        <p>Consultar os procedimentos e checklists para a análise diária do DOU e do Valor Econômico.</p>
+      </a>
+    </main>
+  </div>
+  <script>
+    // Script para atualizar o link do Valor Econômico para a data de hoje
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    const valorLink = document.getElementById('valor-link');
+    valorLink.href = `https://valor.globo.com/impresso/${year}${month}${day}/`;
+  </script>
 </body>
 </html>
