@@ -201,24 +201,52 @@ async def check_and_process_dou(today_str: str):
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # 4e. Montar publicações finais
+        # /!\ Bloco corrigido (lógica idêntica à api.py) /!\
         pubs_finais: List[Publicacao] = []
+
         for p, ai_out in zip(merged_pubs, ai_results):
             if isinstance(ai_out, Exception):
                 p.relevance_reason = f"Erro GRAVE na análise de IA: {ai_out}"
-            elif ai_out is None:
-                pass
-            elif isinstance(ai_out, str):
+                pubs_finais.append(p)
+                continue
+
+            if ai_out is None:
+                # IA ficou muda, mantém reason original (que já pode ter vindo do parser MPO)
+                pubs_finais.append(p)
+                continue
+
+            if isinstance(ai_out, str):
                 lower_ai = ai_out.lower()
+
                 if ai_out.startswith("Erro na análise de IA:"):
                     p.relevance_reason = ai_out
-                elif "sem impacto direto" in lower_ai and p.is_mpo_navy_hit:
-                    p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
-                elif "sem impacto direto" not in lower_ai:
-                    p.relevance_reason = ai_out
-                else:
+                    pubs_finais.append(p)
                     continue
-            
+
+                # IA disse "sem impacto direto"
+                if "sem impacto direto" in lower_ai:
+                    if p.is_mpo_navy_hit:
+                        # a IA quis minimizar mas a gente já sabe que impacta MB
+                        p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
+                        pubs_finais.append(p)
+                    elif MPO_ORG_STRING in (p.organ or "").lower():
+                        # é MPO mas sem hit direto -> ok aceitar o 'sem impacto direto'
+                        p.relevance_reason = ai_out
+                        pubs_finais.append(p)
+                    else:
+                        # se não é MPO e IA falou que é irrelevante -> filtra fora
+                        pass
+                    continue
+
+                # caso feliz: IA deu uma frase útil
+                p.relevance_reason = ai_out
+                pubs_finais.append(p)
+                continue
+
+            # fallback
             pubs_finais.append(p)
+        # /!\ Fim do bloco corrigido /!\
+
 
         if not pubs_finais:
             print("Matérias filtradas pela IA. Nenhuma relevante para notificar.")
