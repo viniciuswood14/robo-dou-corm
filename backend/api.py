@@ -137,7 +137,6 @@ Sua tarefa é ler o TÍTULO e o RESUMO (snippet) de uma notícia do Valor Econô
 
 - Se for sobre Orçamento Federal, LDO, LOA, Teto de Gastos, Arcabouço Fiscal, etc., diga o impacto.
 - Se for sobre Fundos Públicos, analise se afeta a Marinha (Fundo Naval) ou o orçamento.
-- Se a notícia for genérica (ex: "fundo privado investe em startup") ou sem impacto claro para o governo/defesa, responda APENAS: "Sem impacto direto."
 
 TÍTULO: {titulo}
 RESUMO: {resumo}
