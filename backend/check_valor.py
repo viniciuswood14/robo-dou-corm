@@ -3,7 +3,7 @@
 import json
 import os
 import asyncio
-from typing import Dict, Set
+from typing import Dict, Set, List, Any
 
 # Nossas importações
 from google_search import perform_google_search, SearchResult
@@ -25,9 +25,6 @@ except ImportError:
 STATE_FILE_PATH = os.environ.get("VALOR_STATE_FILE_PATH", "/dados/valor_processed_links.json")
 
 # --- CONFIGURAÇÃO DA BUSCA ---
-# Agrupe suas palavras-chave em queries. 
-# A API gratuita tem limite de 100/dia, então não exagere.
-# 3 queries por dia é excelente.
 SEARCH_QUERIES = [
     '"contas publicas" OR "orcamento" OR "politica fiscal"',
     '"fundo publico" OR "fundo privado" OR "economia brasilia"',
@@ -67,25 +64,30 @@ def save_valor_state(links: Set[str]):
         print(f"Erro Crítico: Falha ao salvar estado do Valor: {e}")
 
 
-async def check_and_process_valor(today_str: str):
+async def run_valor_analysis(today_str: str, use_state: bool = True) -> List[Dict[str, Any]]:
     """
-    Função principal de verificação do Valor Econômico.
+    Função principal de análise do Valor.
+    Busca, analisa com IA e retorna uma lista de publicações relevantes.
+    
+    :param today_str: Data no formato YYYY-MM-DD
+    :param use_state: Se True, filtra links já processados (para o bot automático).
+                      Se False, processa tudo (para a chamada manual da API).
+    :return: Lista de dicionários, cada um com {"title", "link", "analise_ia"}
     """
-    print(f"--- Iniciando verificação do Valor Econômico para: {today_str} ---")
     
     # 0. Configura a IA
     if not GEMINI_API_KEY:
         print("Erro (Valor): GEMINI_API_KEY não encontrada.")
-        return
+        return []
     genai.configure(api_key=GEMINI_API_KEY)
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
         print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
-        return
+        return []
 
     # 1. Carrega o estado (links já vistos)
-    processed_links = load_valor_state()
+    processed_links = load_valor_state() if use_state else set()
     
     # 2. Busca os links de hoje
     all_results: Dict[str, SearchResult] = {} # Usamos um dict para deduplicar links
@@ -100,33 +102,33 @@ async def check_and_process_valor(today_str: str):
 
     if not all_results:
         print("Nenhuma notícia encontrada no Valor para hoje.")
-        return
+        return []
 
     # 3. Filtra apenas links novos
-    new_results = [res for res in all_results.values() if res.link not in processed_links]
+    results_to_process = [res for res in all_results.values() if res.link not in processed_links]
 
-    if not new_results:
-        print("Nenhuma notícia *nova* encontrada no Valor.")
-        return
+    if not results_to_process:
+        print("Nenhuma notícia *nova* encontrada no Valor (ou já processada).")
+        return []
     
-    print(f"Encontradas {len(new_results)} notícias novas. Analisando com IA...")
+    print(f"Encontradas {len(results_to_process)} notícias novas. Analisando com IA...")
 
     # 4. Analisa com IA
     pubs_finais = []
-    links_para_salvar = set(processed_links)
+    links_para_salvar = set(processed_links) # Começa com os links antigos
 
-    for res in new_results:
+    for res in results_to_process:
         prompt = GEMINI_VALOR_PROMPT.format(titulo=res.title, resumo=res.snippet)
         
-        # Reutiliza a função get_ai_analysis do robô DOU
         ai_reason = await get_ai_analysis(
             clean_text=f"TÍTULO: {res.title}\nSNIPPET: {res.snippet}",
             model=model,
             prompt_template=GEMINI_VALOR_PROMPT
         )
         
-        # Adiciona o link ao estado para não processar de novo
-        links_para_salvar.add(res.link)
+        # Adiciona o link ao estado para não processar de novo (se use_state=True)
+        if use_state:
+            links_para_salvar.add(res.link)
 
         if ai_reason and "sem impacto direto" not in ai_reason.lower():
             pubs_finais.append({
@@ -137,13 +139,36 @@ async def check_and_process_valor(today_str: str):
 
     if not pubs_finais:
         print("Análise da IA concluiu que nenhuma notícia nova tem impacto direto.")
-        save_valor_state(links_para_salvar) # Salva mesmo assim para não re-analisar
+        if use_state:
+            save_valor_state(links_para_salvar) # Salva mesmo assim para não re-analisar
+        return []
+
+    # 5. Salva o estado (se aplicável) e retorna
+    if use_state:
+        save_valor_state(links_para_salvar)
+    
+    return pubs_finais
+
+
+async def check_and_process_valor(today_str: str):
+    """
+    Função chamada pelo AGENDADOR (run_check.py).
+    Usa a análise e envia para o Telegram.
+    """
+    print(f"--- Iniciando verificação do Valor Econômico para: {today_str} ---")
+    
+    # Roda a análise principal (usando o state)
+    pubs_finais = await run_valor_analysis(today_str, use_state=True)
+    
+    if not pubs_finais:
+        print("--- Verificação do Valor finalizada, sem novidades para o Telegram. ---")
         return
 
-    # 5. Monta e envia a mensagem do Telegram
+    # Monta e envia a mensagem do Telegram
     lines = [f"Alerta de novas publicações no Valor Econômico ({today_str}):\n"]
     
     for p in pubs_finais:
+        # Nota: O Telegram usa 'Markdown', não 'WhatsApp'
         lines.append(f"▶️ *Título:* {p['titulo']}")
         lines.append(f"📌 *Link:* {p['link']}")
         lines.append(f"⚓ *Análise IA:* {p['analise_ia']}")
@@ -152,6 +177,4 @@ async def check_and_process_valor(today_str: str):
     message = "\n".join(lines)
     await send_telegram_message(message)
     
-    # 6. Salva o estado final
-    save_valor_state(links_para_salvar)
-    print("--- Verificação do Valor finalizada com sucesso. ---")
+    print("--- Verificação do Valor finalizada com sucesso (enviado ao Telegram). ---")
