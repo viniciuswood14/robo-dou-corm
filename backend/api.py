@@ -126,7 +126,7 @@ TEXTO DA PUBLICAÇÃO:
 
 # --- [CONFIGS DO VALOR MOVIDAS PARA CÁ] ---
 SEARCH_QUERIES = [
-    '"contas publicas" OR "orcamento" OR "politica fiscal"',
+    '"contas publicas" OR "orcamento" OR "politica fiscal" OR "PIB"',
     '"fundo publico" OR "fundo privado" OR "economia brasilia"',
     '"defesa" OR "marinha" OR "forças armadas" OR "base industrial de defesa"'
 ]
