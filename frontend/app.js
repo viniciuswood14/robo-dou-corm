@@ -6,6 +6,7 @@ document.addEventListener("DOMContentLoaded", function() {
   const el = (id) => document.getElementById(id);
   const btnProcessar = el("btnProcessar");
   const btnProcessarIA = el("btnProcessarIA");
+  const btnProcessarValor = el("btnProcessarValor"); // [NOVO]
   const btnCopiar = el("btnCopiar");
   const preview = el("preview");
 
@@ -17,7 +18,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
   })();
 
-  // Função central de processamento
+  // Função central de processamento (MODIFICADA)
   async function handleProcessing(endpoint) {
     const data = el("data").value.trim();
     const sections = el("sections").value.trim() || "DO1,DO2";
@@ -30,32 +31,44 @@ document.addEventListener("DOMContentLoaded", function() {
 
     const fd = new FormData();
     fd.append("data", data);
-    fd.append("sections", sections);
     
-    if (keywords) {
-      const keywordsList = keywords.split(',')
-        .map(k => k.trim())
-        .filter(k => k.length > 0);
-        
-      if (keywordsList.length > 0) {
-        fd.append("keywords_json", JSON.stringify(keywordsList));
+    let loadingText = "Processando, aguarde…";
+
+    // Adiciona campos específicos do DOU
+    if (endpoint.startsWith("/processar-dou") || endpoint.startsWith("/processar-inlabs")) {
+      fd.append("sections", sections);
+      
+      if (keywords) {
+        const keywordsList = keywords.split(',')
+          .map(k => k.trim())
+          .filter(k => k.length > 0);
+          
+        if (keywordsList.length > 0) {
+          fd.append("keywords_json", JSON.stringify(keywordsList));
+        }
+      }
+      
+      if(endpoint.includes("-ia")) {
+        loadingText = "Processando DOU com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
+      } else {
+        loadingText = "Processando DOU (Rápido) no INLABS, aguarde…";
       }
     }
+    
+    // Texto específico do Valor
+    if (endpoint.startsWith("/processar-valor")) {
+        loadingText = "Buscando notícias no Valor Econômico e analisando com IA, aguarde…";
+    }
 
-    // --- CORREÇÃO v13.5 ---
-    // Adiciona verificação antes de desabilitar
+
     if (btnProcessar) btnProcessar.disabled = true;
     if (btnProcessarIA) btnProcessarIA.disabled = true;
+    if (btnProcessarValor) btnProcessarValor.disabled = true; // [NOVO]
     if (btnCopiar) btnCopiar.disabled = true;
-    // ---------------------
 
     if (preview) {
       preview.classList.add("loading");
-      if (endpoint.includes("-ia")) {
-        preview.textContent = "Processando com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
-      } else {
-        preview.textContent = "Processando (Rápido) no INLABS, aguarde…";
-      }
+      preview.textContent = loadingText;
     }
 
     try {
@@ -72,23 +85,18 @@ document.addEventListener("DOMContentLoaded", function() {
       const texto = body?.whatsapp_text || "(Sem resultados)";
       if (preview) preview.textContent = texto;
 
-      // --- CORREÇÃO v13.5 ---
-      // Adiciona verificação antes de habilitar/desabilitar
       if (btnCopiar) {
         btnCopiar.disabled = !texto || texto === "(Sem resultados)";
       }
-      // ---------------------
 
     } catch (err) {
       if (preview) preview.textContent = `Falha na requisição: ${err.message || err}`;
     } finally {
       
-      // --- CORREÇÃO v13.5 ---
-      // Adiciona verificação antes de re-habilitar
       if (btnProcessar) btnProcessar.disabled = false;
       if (btnProcessarIA) btnProcessarIA.disabled = false;
+      if (btnProcessarValor) btnProcessarValor.disabled = false; // [NOVO]
       if (preview) preview.classList.remove("loading");
-      // ---------------------
     }
   }
 
@@ -97,7 +105,12 @@ document.addEventListener("DOMContentLoaded", function() {
     btnProcessar.addEventListener("click", () => handleProcessing("/processar-inlabs"));
   }
   if (btnProcessarIA) {
-    btnProcessarIA.addEventListener("click", () => handleProcessing("/processar-inlabs-ia"));
+    // [MODIFICADO] Endpoint renomeado
+    btnProcessarIA.addEventListener("click", () => handleProcessing("/processar-dou-ia"));
+  }
+  if (btnProcessarValor) {
+    // [NOVO]
+    btnProcessarValor.addEventListener("click", () => handleProcessing("/processar-valor-ia"));
   }
 
   // Botão Copiar
