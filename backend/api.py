@@ -14,24 +14,21 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 
 # --- [NOVA IMPORTAÇÃO] ---
-# Importa a função de análise do Valor (SEM o envio ao Telegram)
-try:
-    from check_valor import run_valor_analysis
-except ImportError:
-    run_valor_analysis = None
+from google_search import perform_google_search, SearchResult
 # --- [FIM DA NOVA IMPORTAÇÃO] ---
 
 
 # =====================================================================================
-# Robô DOU API - v14.0.0 (Frontend do Valor)
+# Robô DOU API - v14.0.1 (Correção Import Circular)
 #
 # Diferenças:
-# - Adicionado endpoint /processar-valor-ia
-# - /processar-inlabs-ia renomeado para /processar-dou-ia
+# - A função 'run_valor_analysis' agora vive no 'api.py' para quebrar a
+#   dependência circular.
+# - 'check_valor.py' (bot do telegram) vai importar esta função.
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v14.0.0"
+    title="Robô DOU/Valor API - v14.0.1"
 )
 
 app.add_middleware(
@@ -42,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ... (Todo o bloco de CONFIG permanece o mesmo) ...
+
 # =====================================================================================
 # CONFIG
 # =====================================================================================
@@ -55,6 +52,7 @@ except FileNotFoundError:
 except json.JSONDecodeError:
     raise RuntimeError("Erro: Falha ao decodificar 'config.json'. Verifique a sintaxe.")
 
+# Credenciais / URLs InLabs
 INLABS_BASE = os.getenv(
     "INLABS_BASE", config.get("INLABS_BASE", "https://inlabs.in.gov.br")
 )
@@ -63,15 +61,20 @@ INLABS_LOGIN_URL = os.getenv(
 )
 INLABS_USER = os.getenv("INLABS_USER", config.get("INLABS_USER", None))
 INLABS_PASS = os.getenv("INLABS_PASS", config.get("INLABS_PASS", None))
+
+# Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", config.get("GEMINI_API_KEY", None))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
+# Constantes auxiliares (templates e listas de palavras-chave)
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
 TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
 ANNOTATION_POSITIVE_GENERIC = config.get("ANNOTATION_POSITIVE_GENERIC", "")
 ANNOTATION_NEGATIVE = config.get("ANNOTATION_NEGATIVE", "")
-MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})
+
+MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})  # códigos UO -> nome
 KEYWORDS_DIRECT_INTEREST_S1 = config.get("KEYWORDS_DIRECT_INTEREST_S1", [])
 BUDGET_KEYWORDS_S1 = config.get("BUDGET_KEYWORDS_S1", [])
 MPO_ORG_STRING = config.get(
@@ -82,6 +85,8 @@ TERMS_AND_ACRONYMS_S2 = config.get("TERMS_AND_ACRONYMS_S2", [])
 NAMES_TO_TRACK = sorted(
     list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower
 )
+
+# PROMPTS IA (DOU)
 GEMINI_MASTER_PROMPT = """
 Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
 Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
@@ -103,6 +108,7 @@ Responda só a frase final, sem rodeio adicional.
 
 TEXTO DA PUBLICAÇÃO:
 """
+
 GEMINI_MPO_PROMPT = """
 Você é analista orçamentário da Marinha do Brasil. A publicação abaixo é do Ministério do Planejamento e Orçamento (MPO) e JÁ FOI CLASSIFICADA como tendo impacto direto em dotações ligadas à Marinha (ex.: Fundo Naval, Comando da Marinha, etc.).
 
@@ -117,6 +123,28 @@ Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi mar
 
 TEXTO DA PUBLICAÇÃO:
 """
+
+# --- [CONFIGS DO VALOR MOVIDAS PARA CÁ] ---
+SEARCH_QUERIES = [
+    '"contas publicas" OR "orcamento" OR "politica fiscal"',
+    '"fundo publico" OR "fundo privado" OR "economia brasilia"',
+    '"defesa" OR "marinha" OR "forças armadas" OR "base industrial de defesa"'
+]
+
+GEMINI_VALOR_PROMPT = """
+Você é um analista de orçamento e finanças do Comando da Marinha do Brasil.
+Sua tarefa é ler o TÍTULO e o RESUMO (snippet) de uma notícia do Valor Econômico e dizer, em uma única frase curta (máximo 2 linhas), qual o impacto ou relevância para a Marinha, Defesa ou para o Orçamento Federal.
+
+- Se for sobre Orçamento Federal, LDO, LOA, Teto de Gastos, Arcabouço Fiscal, etc., diga o impacto.
+- Se for sobre Fundos Públicos, analise se afeta a Marinha (Fundo Naval) ou o orçamento.
+- Se a notícia for genérica (ex: "fundo privado investe em startup") ou sem impacto claro para o governo/defesa, responda APENAS: "Sem impacto direto."
+
+TÍTULO: {titulo}
+RESUMO: {resumo}
+
+Responda só a frase final, sem rodeio.
+"""
+# --- [FIM DAS CONFIGS DO VALOR] ---
 
 
 # =====================================================================================
@@ -200,7 +228,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
         lines.append("")
 
-        for p in subseq:
+        for p in pubs:
             lines.append(f"▶️ {p.organ or 'Órgão'}")
             lines.append(f"📌 {p.type or 'Ato/Portaria'}")
             if p.summary:
@@ -253,17 +281,15 @@ def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
         return "\n".join(lines)
 
     for p in pubs:
-        lines.append(f"▶️ *Título:* {p.titulo}")
-        lines.append(f"📌 *Link:* {p.link}")
-        lines.append(f"⚓ *Análise IA:* {p.analise_ia}")
+        # Formato WhatsApp (sem Markdown)
+        lines.append(f"▶️ Título: {p.titulo}")
+        lines.append(f"📌 Link: {p.link}")
+        lines.append(f"⚓ Análise IA: {p.analise_ia}")
         lines.append("") # Espaçamento
 
     return "\n".join(lines)
 # --- [FIM DO NOVO HELPER] ---
 
-
-# ... (Todo o resto de api.py: PARSER MPO, CLASSIFICAÇÃO, INLABS, /processar-inlabs) ...
-# ... (permanece idêntico) ...
 
 # =====================================================================================
 # PARSER MPO (tabelas de suplementação / redução / totais por UO)
@@ -904,10 +930,100 @@ async def get_ai_analysis(
         return "Erro na análise de IA: " + str(e)[:100]
 
 
+# --- [FUNÇÃO DO VALOR MOVIDA PARA CÁ] ---
+async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Dict[str, Any]], Set[str]):
+    """
+    Função principal de análise do Valor.
+    Busca, analisa com IA e retorna uma lista de publicações relevantes.
+    
+    :param today_str: Data no formato YYYY-MM-DD
+    :param use_state: Se True, filtra links já processados (para o bot automático).
+                      Se False, processa tudo (para a chamada manual da API).
+    :return: (Lista de dicionários, Set de links processados)
+    """
+    
+    # 0. Configura a IA
+    if not GEMINI_API_KEY:
+        print("Erro (Valor): GEMINI_API_KEY não encontrada.")
+        return [], set()
+    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+    except Exception as e:
+        print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
+        return [], set()
+
+    # 1. Carrega o estado (links já vistos)
+    # NOTA: A lógica de carregar/salvar o state foi movida para o 'check_valor.py'
+    processed_links = set()
+    if use_state:
+        # Apenas o bot automático (check_valor) deve gerenciar o state file.
+        # A chamada da API manual sempre processa tudo.
+        print("Bot automático: A lógica de state foi movida para 'check_valor.py'")
+        pass
+    
+    # 2. Busca os links de hoje
+    all_results: Dict[str, SearchResult] = {} # Usamos um dict para deduplicar links
+    
+    for query in SEARCH_QUERIES:
+        print(f"Buscando query: {query}")
+        results = await perform_google_search(query, after_date=today_str)
+        for res in results:
+            if res.link not in all_results:
+                all_results[res.link] = res
+        await asyncio.sleep(1) # Pequena pausa para não sobrecarregar a API
+
+    if not all_results:
+        print("Nenhuma notícia encontrada no Valor para hoje.")
+        return [], set()
+
+    # 3. Filtra apenas links novos
+    # A API sempre processa todos; o bot automático filtrará DEPOIS.
+    results_to_process = list(all_results.values())
+
+    if not results_to_process:
+        print("Nenhuma notícia *nova* encontrada no Valor (ou já processada).")
+        return [], set()
+    
+    print(f"Encontradas {len(results_to_process)} notícias no Valor. Analisando com IA...")
+
+    # 4. Analisa com IA
+    pubs_finais = []
+    links_encontrados = set()
+
+    for res in results_to_process:
+        prompt = GEMINI_VALOR_PROMPT.format(titulo=res.title, resumo=res.snippet)
+        
+        ai_reason = await get_ai_analysis(
+            clean_text=f"TÍTULO: {res.title}\nSNIPPET: {res.snippet}",
+            model=model,
+            prompt_template=GEMINI_VALOR_PROMPT
+        )
+        
+        links_encontrados.add(res.link)
+
+        # Para o front-end, queremos ver *todas* as análises,
+        # inclusive as "Sem impacto direto".
+        # O bot do Telegram (check_valor.py) fará o filtro.
+        if ai_reason:
+            pubs_finais.append({
+                "titulo": res.title,
+                "link": res.link,
+                "analise_ia": ai_reason
+            })
+
+    if not pubs_finais:
+        print("Análise da IA não retornou nenhuma razão.")
+        return [], links_encontrados
+
+    # 5. Retorna os resultados brutos
+    return pubs_finais, links_encontrados
+# --- [FIM DA FUNÇÃO MOVIDA] ---
+
+
 # =====================================================================================
 # /processar-dou-ia (COM IA) - Endpoint Lento (DOU)
 # =====================================================================================
-
 @app.post("/processar-dou-ia", response_model=ProcessResponse)
 async def processar_dou_ia(
     data: str = Form(..., description="YYYY-MM-DD"),
@@ -916,19 +1032,12 @@ async def processar_dou_ia(
         None, description="JSON string de keywords"
     ),
 ):
-    """
-    Pipeline com IA (DOU):
-    - faz todo o fluxo de /processar-inlabs
-    - depois chama Gemini pra uma frase curta por item
-    - protege MPO com impacto direto na Marinha (is_mpo_navy_hit)
-    """
-
+    # ... (Esta função permanece idêntica) ...
     if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
             detail="A variável GEMINI_API_KEY não está definida.",
         )
-
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
@@ -936,13 +1045,11 @@ async def processar_dou_ia(
             status_code=500,
             detail=f"Falha ao inicializar o modelo de IA: {e}",
         )
-
     secs = (
         [s.strip().upper() for s in sections.split(",") if s.strip()]
         if sections
         else ["DO1"]
     )
-
     custom_keywords: List[str] = []
     if keywords_json:
         try:
@@ -955,10 +1062,8 @@ async def processar_dou_ia(
                 ]
         except json.JSONDecodeError:
             pass
-
     client = await inlabs_login_and_get_session()
     pubs_filtradas: List[Publicacao] = []
-
     try:
         listing_url = await resolve_date_url(client, data)
         html = await fetch_listing_html(client, data)
@@ -968,12 +1073,10 @@ async def processar_dou_ia(
                 status_code=404,
                 detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.",
             )
-
         all_xml_blobs = []
         for zurl in zip_links:
             zb = await download_zip(client, zurl)
             all_xml_blobs.extend(extract_xml_from_zip(zb))
-
         materias: Dict[str, Dict[str, Any]] = {}
         for blob in all_xml_blobs:
             try:
@@ -1001,8 +1104,6 @@ async def processar_dou_ia(
                     materias[materia_id]["main_article"] = article
             except Exception:
                 continue
-
-        # Estágio 1 (regra fixa)
         for materia_id, content in materias.items():
             if content["main_article"]:
                 publication = process_grouped_materia(
@@ -1012,8 +1113,6 @@ async def processar_dou_ia(
                 )
                 if publication:
                     pubs_filtradas.append(publication)
-
-        # Dedup
         seen: Set[str] = set()
         merged_pubs: List[Publicacao] = []
         for p in pubs_filtradas:
@@ -1027,8 +1126,6 @@ async def processar_dou_ia(
             if key not in seen:
                 seen.add(key)
                 merged_pubs.append(p)
-
-        # Estágio 2 (IA)
         tasks = []
         for p in merged_pubs:
             prompt_to_use = GEMINI_MASTER_PROMPT
@@ -1044,7 +1141,6 @@ async def processar_dou_ia(
                         prompt_to_use,
                     )
                 )
-
         ai_results = await asyncio.gather(*tasks, return_exceptions=True)
         pubs_finais: List[Publicacao] = []
         for p, ai_out in zip(merged_pubs, ai_results):
@@ -1075,39 +1171,32 @@ async def processar_dou_ia(
                 pubs_finais.append(p)
                 continue
             pubs_finais.append(p)
-
         texto = monta_whatsapp(pubs_finais, data)
-
         return ProcessResponse(
             date=data,
             count=len(pubs_finais),
             publications=pubs_finais,
             whatsapp_text=texto,
         )
-
     finally:
         await client.aclose()
 
 
-# --- [NOVO ENDPOINT PARA O VALOR] ---
+# --- [ENDPOINT DO VALOR MODIFICADO] ---
 @app.post("/processar-valor-ia", response_model=ProcessResponseValor)
 async def processar_valor_ia(
     data: str = Form(..., description="YYYY-MM-DD")
 ):
     """
     Pipeline com IA (Valor Econômico):
-    - Chama a função de análise do 'check_valor.py'
+    - Chama a função interna 'run_valor_analysis'
     - NÃO usa o state, para permitir re-análise manual
     - Retorna o resultado formatado
     """
-    if not run_valor_analysis:
-        raise HTTPException(
-            status_code=500,
-            detail="A função 'run_valor_analysis' não foi importada. Verifique 'check_valor.py'."
-        )
     
     # Roda a análise, mas sem usar o state file (permite re-processar)
-    pubs_list = await run_valor_analysis(data, use_state=False)
+    # A função agora retorna (lista, set_de_links)
+    pubs_list, _ = await run_valor_analysis(data, use_state=False)
 
     pubs_model = [ValorPublicacao(**p) for p in pubs_list]
     texto = monta_valor_whatsapp(pubs_model, data)
@@ -1118,7 +1207,7 @@ async def processar_valor_ia(
         publications=pubs_model,
         whatsapp_text=texto
     )
-# --- [FIM DO NOVO ENDPOINT] ---
+# --- [FIM DA MODIFICAÇÃO] ---
 
 
 # =====================================================================================
