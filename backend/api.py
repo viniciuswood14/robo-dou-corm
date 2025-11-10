@@ -126,9 +126,14 @@ TEXTO DA PUBLICAÇÃO:
 
 # --- [CONFIGS DO VALOR MOVIDAS PARA CÁ] ---
 SEARCH_QUERIES = [
-    '"contas publicas" OR "orcamento" OR "politica fiscal" OR "PIB"',
-    '"fundo publico" OR "fundo privado" OR "economia brasilia"',
-    '"defesa" OR "marinha" OR "forças armadas" OR "base industrial de defesa"'
+    # Query 1: Termos de Política Fiscal Macro
+    '"contas publicas" OR "politica fiscal" OR "Arcabouço fiscal" OR "Teto de gastos" OR "Meta fiscal" OR "Resultado primário" OR "Resultado nominal" OR "Dívida Pública" OR "Gastos Públicos" OR "Arrecadação" OR "Reforma tributária" OR "Incentivos fiscais"',
+    
+    # Query 2: Termos de Instrumentos Orçamentários
+    '"orcamento" OR "LDO" OR "LOA" OR "PPA" OR "Contingenciamento" OR "Crédito adicional" OR "Despesas discricionárias" OR "Despesas obrigatórias" OR "fundo publico" OR "governo federal"',
+    
+    # Query 3: Economia Geral e Defesa (Termos de captura ampla)
+    '"economia" OR "mercado financeiro" OR "PIB" OR "Inflação" OR "defesa" OR "marinha" OR "forças armadas" OR "base industrial de defesa"'
 ]
 
 GEMINI_VALOR_PROMPT = """
