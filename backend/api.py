@@ -1,3 +1,6 @@
+# Nome do arquivo: api.py
+# Versão: 14.0.2 (Correção filtro MF)
+
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,16 +22,16 @@ from google_search import perform_google_search, SearchResult
 
 
 # =====================================================================================
-# Robô DOU API - v14.0.1 (Correção Import Circular)
+# Robô DOU API - v14.0.2 (Correção Filtro MF)
 #
 # Diferenças:
-# - A função 'run_valor_analysis' agora vive no 'api.py' para quebrar a
-#   dependência circular.
-# - 'check_valor.py' (bot do telegram) vai importar esta função.
+# - A lógica de filtro da Seção 1 (process_grouped_materia) agora
+#   também considera BUDGET_KEYWORDS_S1 para o Ministério da Fazenda (MF),
+#   além do MPO.
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v14.0.1"
+    title="Robô DOU/Valor API - v14.0.2"
 )
 
 app.add_middleware(
@@ -523,7 +526,7 @@ def process_grouped_materia(
     full_text_content: str,
     custom_keywords: List[str],
 ) -> Optional[Publicacao]:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função foi MODIFICADA) ...
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
     if (
@@ -556,13 +559,21 @@ def process_grouped_materia(
         )
         if match:
             summary = norm(match.group(1))
+    
     is_relevant = False
     reason = None
     search_content_lower = norm(full_text_content).lower()
     clean_text_for_ia = ""
     is_mpo_navy_hit_flag = False
+    
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ_lower
+        # --- [MODIFICAÇÃO v14.0.2] ---
+        # Adiciona verificação para o Ministério da Fazenda
+        is_mf = "ministério da fazenda" in organ_lower
+        # --- [FIM DA MODIFICAÇÃO] ---
+
+        # --- ETAPA 1: MPO + UOs da Marinha (MAIOR PRIORIDADE) ---
         if is_mpo:
             found_navy_codes = [
                 code for code in MPO_NAVY_TAGS
@@ -578,6 +589,7 @@ def process_grouped_materia(
                     is_mpo_navy_hit_flag = True
                 else:
                     is_mpo_navy_hit_flag = False
+                
                 summary_lower = summary.lower()
                 gatilho_gnd = (
                     "grupo de natureza da despesa" in summary_lower
@@ -622,30 +634,48 @@ def process_grouped_materia(
                         ANNOTATION_POSITIVE_GENERIC
                         or "Publicação potencialmente relevante para a Marinha. Recomenda-se análise detalhada."
                     )
-            elif any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
-                is_relevant = True
-                reason = (
-                    ANNOTATION_NEGATIVE
-                    or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
-                )
-        else:
+
+        # --- ETAPA 2: Keywords de Interesse Direto (Ex: "Comando da Marinha") ---
+        # Roda para todos, caso a Etapa 1 não tenha pego
+        if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
                     is_relevant = True
                     reason = f"Há menção específica à TAG: '{kw}'."
                     break
+        
+        # --- ETAPA 3: Keywords de Orçamento (SÓ SE FOR MPO ou MF) ---
+        # [MODIFICAÇÃO v14.0.2]
+        # Se ainda não for relevante, checa keywords de orçamento
+        # A lógica original só checava MPO (no 'elif'), agora checa MPO ou MF.
+        if not is_relevant and (is_mpo or is_mf):
+            if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
+                is_relevant = True
+                if is_mpo:
+                    # É MPO, mas não achou UO (lógica antiga do 'elif')
+                    reason = (
+                        ANNOTATION_NEGATIVE
+                        or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
+                    )
+                else:
+                    # É MF e tem keyword de orçamento (Nova lógica)
+                    reason = "Ato orçamentário do Ministério da Fazenda com potencial impacto orçamentário."
+
     elif "DO2" in section:
+        # --- Lógica da Seção 2 (DO2) - Permanece igual ---
         soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
         for tag in soup_copy.find_all("p", class_=["assina", "cargo"]):
             tag.decompose()
         clean_search_content_lower = norm(
             soup_copy.get_text(strip=True)
         ).lower()
+        
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
                 is_relevant = True
                 reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
                 break
+        
         if not is_relevant:
             for name in NAMES_TO_TRACK:
                 name_lower = name.lower()
@@ -660,6 +690,8 @@ def process_grouped_materia(
                         break
                 if is_relevant:
                     break
+    
+    # --- Lógica de Keywords Customizadas - Permanece igual ---
     found_custom_kw = None
     custom_reason_text = None
     if custom_keywords:
@@ -670,12 +702,15 @@ def process_grouped_materia(
                     f"Há menção à palavra-chave personalizada: '{kw}'."
                 )
                 break
+    
     if found_custom_kw:
         is_relevant = True
         if reason and reason != ANNOTATION_NEGATIVE:
             reason = f"{reason}\n⚓ {custom_reason_text}"
         elif (not reason) or reason == ANNOTATION_NEGATIVE:
             reason = custom_reason_text
+            
+    # --- Montagem final - Permanece igual ---
     if is_relevant:
         soup_full_clean = BeautifulSoup(full_text_content, "lxml-xml")
         clean_text_for_ia = norm(soup_full_clean.get_text(strip=True))
@@ -689,6 +724,7 @@ def process_grouped_materia(
             clean_text=clean_text_for_ia,
             is_mpo_navy_hit=is_mpo_navy_hit_flag,
         )
+    
     return None
 
 # =====================================================================================
