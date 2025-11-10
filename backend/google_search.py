@@ -1,26 +1,12 @@
 # Nome do arquivo: google_search.py
+# Versão: 14.0.5 (Busca por data exata)
 
 import httpx
 import os
 from typing import List, Dict, Optional
 
-# --------------------------------------------------------------------------
-# ATENÇÃO: Configuração necessária
-# --------------------------------------------------------------------------
-# 1. Obtenha sua API Key:
-#    - Vá para: https://console.cloud.google.com/apis/credentials
-#    - Crie ou selecione um projeto.
-#    - Clique em "+ CREATE CREDENTIALS" -> "API key".
-#    - Copie a chave e coloque na sua variável de ambiente "GOOGLE_API_KEY".
+# ... (Configuração do GOOGLE_API_KEY e GOOGLE_CX_ID permanece igual) ...
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
-# 2. Obtenha seu Search Engine ID (CX):
-#    - Vá para: https://cse.google.com/cse/all
-#    - Clique em "Add" (Adicionar).
-#    - Em "Sites to search", coloque: *.valor.globo.com/*
-#    - Dê um nome (ex: "RoboValor") e crie.
-#    - Na tela de "Edit search engine", copie o "Search engine ID" (CX).
-#    - Coloque na sua variável de ambiente "GOOGLE_CX_ID".
 GOOGLE_CX_ID = os.environ.get("GOOGLE_CX_ID")
 # --------------------------------------------------------------------------
 
@@ -41,27 +27,39 @@ class SearchResult(dict):
     def snippet(self) -> str:
         return self.get("snippet", "").replace("\n", " ")
 
-async def perform_google_search(query: str, after_date: str) -> List[SearchResult]:
+# --- [MODIFICAÇÃO v14.0.5] ---
+async def perform_google_search(query: str, search_date: str) -> List[SearchResult]:
     """
-    Busca no Google CSE por uma query, filtrando por data.
+    Busca no Google CSE por uma query, filtrando por data EXATA.
+    
+    :param query: Termos de busca
+    :param search_date: Data no formato YYYY-MM-DD
     """
     if not GOOGLE_API_KEY or not GOOGLE_CX_ID:
         print("Erro: GOOGLE_API_KEY ou GOOGLE_CX_ID não configurados.")
         return []
 
-    # A API do Google usa o formato 'dateRestrict' d[N] para "últimos N dias".
-    # Vamos usar 'sort' que permite 'date:r:YYYYMMDD:YYYYMMDD'
-    # Mas uma forma mais simples é usar a query 'after:YYYY-MM-DD'
-    
-    full_query = f"{query} site:valor.globo.com after:{after_date}"
+    # A API do Google usa 'sort=date:r:YYYYMMDD:YYYYMMDD' para um dia específico
+    try:
+        # Converte "YYYY-MM-DD" para "YYYYMMDD"
+        date_yyyymmdd = search_date.replace("-", "")
+        date_sort_param = f"date:r:{date_yyyymmdd}:{date_yyyymmdd}"
+    except Exception as e:
+        print(f"Data inválida fornecida para busca: {search_date}. Erro: {e}")
+        return []
+
+    # Removemos o "after:" da query e usamos o parâmetro 'sort'
+    full_query = f"{query} site:valor.globo.com"
     
     params = {
         "key": GOOGLE_API_KEY,
         "cx": GOOGLE_CX_ID,
         "q": full_query,
-        "num": 10 # Limita a 10 resultados
+        "num": 10, # Limita a 10 resultados
+        "sort": date_sort_param # Adiciona o filtro de data exata
     }
-
+    
+    # ... (o resto da função permanece igual) ...
     results = []
     try:
         async with httpx.AsyncClient() as client:
@@ -82,3 +80,4 @@ async def perform_google_search(query: str, after_date: str) -> List[SearchResul
     except Exception as e:
         print(f"Exceção ao buscar no Google: {e}")
         return []
+# --- [FIM DA MODIFICAÇÃO v14.0.5] ---
