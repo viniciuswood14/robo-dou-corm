@@ -270,7 +270,8 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
 
 
 # --- [NOVO HELPER PARA O VALOR] ---
-def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
+def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
+    # ... (Esta função permanece idêntica à original) ...
     meses_pt = {
         1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
         5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
@@ -283,18 +284,61 @@ def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
         dd = when
 
     lines = []
-    lines.append(f"Análise do Valor Econômico de {dd}:\n")
+    lines.append("Bom dia, senhores!")
+    lines.append("")
+    lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
+    lines.append("")
+
+    pubs_by_section: Dict[str, List[Publicacao]] = {}
+    for p in pubs:
+        sec = p.section or "DOU"
+        pubs_by_section.setdefault(sec, []).append(p)
 
     if not pubs:
-        lines.append("— Sem notícias de impacto direto encontradas. —")
+        lines.append("— Sem ocorrências para os critérios informados —")
         return "\n".join(lines)
 
-    for p in pubs:
-        # Formato WhatsApp (sem Markdown)
-        lines.append(f"▶️ Título: {p.titulo}")
-        lines.append(f"📌 Link: {p.link}")
-        lines.append(f"⚓ Análise IA: {p.analise_ia}")
-        lines.append("") # Espaçamento
+    for section_name in sorted(pubs_by_section.keys()):
+        subseq = pubs_by_section[section_name]
+        if not subseq:
+            continue
+
+        lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
+        lines.append("")
+
+        # --- [CORREÇÃO APLICADA AQUI] ---
+        # O loop agora usa 'subseq' (a lista filtrada da seção)
+        # e não mais 'pubs' (a lista completa).
+        for p in subseq:
+        # --- [FIM DA CORREÇÃO] ---
+
+            lines.append(f"▶️ {p.organ or 'Órgão'}")
+            lines.append(f"📌 {p.type or 'Ato/Portaria'}")
+            if p.summary:
+                lines.append(p.summary)
+
+            reason = p.relevance_reason or "Para conhecimento."
+            prefix = "⚓"
+            
+            if (
+                reason.startswith("Erro na análise de IA:")
+                or reason.startswith("Erro GRAVE")
+                or reason.startswith("⚠️")
+            ):
+                prefix = "⚠️ Erro IA:"
+                reason = (
+                    reason.replace("Erro na análise de IA:", "")
+                    .replace("Erro GRAVE na análise de IA:", "")
+                    .replace("⚠️ IA ignorou impacto MPO:", "")
+                    .strip()
+                )
+
+            if "\n" in reason:
+                lines.append(f"{prefix}\n{reason}")
+            else:
+                lines.append(f"{prefix} {reason}")
+
+            lines.append("")
 
     return "\n".join(lines)
 # --- [FIM DO NOVO HELPER] ---
