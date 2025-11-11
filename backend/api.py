@@ -1,5 +1,5 @@
 # Nome do arquivo: api.py
-# Versão: 14.0.2 (Correção filtro MF)
+# Versão: 14.0.5 (Filtro MF + Busca Valor)
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,22 +16,24 @@ from bs4 import BeautifulSoup
 # IA / Gemini
 import google.generativeai as genai
 
-# --- [NOVA IMPORTAÇÃO] ---
+# --- [MODIFICAÇÃO v14.0.5] ---
+# Importa a nova função de busca do 'google_search.py'
 from google_search import perform_google_search, SearchResult
-# --- [FIM DA NOVA IMPORTAÇÃO] ---
+# --- [FIM DA MODIFICAÇÃO] ---
 
 
 # =====================================================================================
-# Robô DOU API - v14.0.2 (Correção Filtro MF)
+# Robô DOU API - v14.0.5
 #
 # Diferenças:
-# - A lógica de filtro da Seção 1 (process_grouped_materia) agora
-#   também considera BUDGET_KEYWORDS_S1 para o Ministério da Fazenda (MF),
-#   além do MPO.
+# - 'process_grouped_materia' (DO1) agora considera BUDGET_KEYWORDS_S1
+#   para o Ministério da Fazenda (MF), além do MPO.
+# - 'run_valor_analysis' chama 'perform_google_search' com 'search_date'
+#   para busca em data exata (requer 'google_search.py' v14.0.5).
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v14.0.2"
+    title="Robô DOU/Valor API - v14.0.5"
 )
 
 app.add_middleware(
@@ -200,7 +202,7 @@ def norm(s: Optional[str]) -> str:
     return _ws.sub(" ", s).strip()
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     meses_pt = {
         1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
         5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
@@ -327,6 +329,7 @@ def _parse_money(raw: str) -> int:
     except:
         return 0
 def parse_mpo_budget_table(full_text_content: str) -> str:
+    # ... (Esta função permanece idêntica à original) ...
     def _clean_text_local(t: str) -> str:
         if t is None:
             return ""
@@ -526,7 +529,8 @@ def process_grouped_materia(
     full_text_content: str,
     custom_keywords: List[str],
 ) -> Optional[Publicacao]:
-    # ... (Esta função foi MODIFICADA) ...
+    # --- [MODIFICAÇÃO v14.0.2 - Filtro MF] ---
+    # (Esta função foi MODIFICADA da original)
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
     if (
@@ -568,10 +572,7 @@ def process_grouped_materia(
     
     if "DO1" in section:
         is_mpo = MPO_ORG_STRING in organ_lower
-        # --- [MODIFICAÇÃO v14.0.2] ---
-        # Adiciona verificação para o Ministério da Fazenda
         is_mf = "ministério da fazenda" in organ_lower
-        # --- [FIM DA MODIFICAÇÃO] ---
 
         # --- ETAPA 1: MPO + UOs da Marinha (MAIOR PRIORIDADE) ---
         if is_mpo:
@@ -636,7 +637,6 @@ def process_grouped_materia(
                     )
 
         # --- ETAPA 2: Keywords de Interesse Direto (Ex: "Comando da Marinha") ---
-        # Roda para todos, caso a Etapa 1 não tenha pego
         if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
@@ -645,24 +645,20 @@ def process_grouped_materia(
                     break
         
         # --- ETAPA 3: Keywords de Orçamento (SÓ SE FOR MPO ou MF) ---
-        # [MODIFICAÇÃO v14.0.2]
-        # Se ainda não for relevante, checa keywords de orçamento
-        # A lógica original só checava MPO (no 'elif'), agora checa MPO ou MF.
         if not is_relevant and (is_mpo or is_mf):
             if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
                 if is_mpo:
-                    # É MPO, mas não achou UO (lógica antiga do 'elif')
                     reason = (
                         ANNOTATION_NEGATIVE
                         or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
                     )
                 else:
-                    # É MF e tem keyword de orçamento (Nova lógica)
+                    # É MF e tem keyword de orçamento (Nova lógica v14.0.2)
                     reason = "Ato orçamentário do Ministério da Fazenda com potencial impacto orçamentário."
 
     elif "DO2" in section:
-        # --- Lógica da Seção 2 (DO2) - Permanece igual ---
+        # --- Lógica da Seção 2 (DO2) - Permanece idêntica à original ---
         soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
         for tag in soup_copy.find_all("p", class_=["assina", "cargo"]):
             tag.decompose()
@@ -691,7 +687,7 @@ def process_grouped_materia(
                 if is_relevant:
                     break
     
-    # --- Lógica de Keywords Customizadas - Permanece igual ---
+    # --- Lógica de Keywords Customizadas - Permanece idêntica à original ---
     found_custom_kw = None
     custom_reason_text = None
     if custom_keywords:
@@ -710,7 +706,7 @@ def process_grouped_materia(
         elif (not reason) or reason == ANNOTATION_NEGATIVE:
             reason = custom_reason_text
             
-    # --- Montagem final - Permanece igual ---
+    # --- Montagem final - Permanece idêntica à original ---
     if is_relevant:
         soup_full_clean = BeautifulSoup(full_text_content, "lxml-xml")
         clean_text_for_ia = norm(soup_full_clean.get_text(strip=True))
@@ -726,12 +722,14 @@ def process_grouped_materia(
         )
     
     return None
+# --- [FIM DA MODIFICAÇÃO v14.0.2] ---
+
 
 # =====================================================================================
 # INLABS / DOWNLOAD ZIP
 # =====================================================================================
 async def inlabs_login_and_get_session() -> httpx.AsyncClient:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     if not INLABS_USER or not INLABS_PASS:
         raise HTTPException(
             status_code=500,
@@ -755,7 +753,7 @@ async def inlabs_login_and_get_session() -> httpx.AsyncClient:
     return client
 
 async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     r = await client.get(INLABS_BASE)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -780,7 +778,7 @@ async def resolve_date_url(client: httpx.AsyncClient, date: str) -> str:
     )
 
 async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     base_url = await resolve_date_url(client, date)
     r = await client.get(base_url)
     if r.status_code >= 400:
@@ -795,7 +793,7 @@ def pick_zip_links_from_listing(
     base_url_for_rel: str,
     only_sections: List[str],
 ) -> List[str]:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     soup = BeautifulSoup(html, "html.parser")
     links: List[str] = []
     wanted = set(s.upper() for s in only_sections) if only_sections else {"DO1"}
@@ -808,7 +806,7 @@ def pick_zip_links_from_listing(
     return sorted(list(set(links)))
 
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     r = await client.get(url)
     if r.status_code >= 400:
         raise HTTPException(
@@ -818,7 +816,7 @@ async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
     return r.content
 
 def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     xml_blobs: List[bytes] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
@@ -838,7 +836,7 @@ async def processar_inlabs(
         description='JSON lista de keywords. Ex: \'["amazul","prosub"]\'',
     ),
 ):
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     secs = (
         [s.strip().upper() for s in sections.split(",") if s.strip()]
         if sections
@@ -939,7 +937,7 @@ async def get_ai_analysis(
     model: genai.GenerativeModel,
     prompt_template: str = GEMINI_MASTER_PROMPT,
 ) -> Optional[str]:
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     try:
         prompt = f"{prompt_template}\n\n{clean_text}"
         response = await model.generate_content_async(prompt)
@@ -1006,15 +1004,20 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
     all_results: Dict[str, SearchResult] = {} # Usamos um dict para deduplicar links
     
     for query in SEARCH_QUERIES:
-        print(f"Buscando query: {query}")
-        results = await perform_google_search(query, after_date=today_str)
+        print(f"Buscando query: {query} para a data {today_str}")
+        
+        # --- [MODIFICAÇÃO v14.0.5] ---
+        # A chamada agora usa 'search_date'
+        results = await perform_google_search(query, search_date=today_str)
+        # --- [FIM DA MODIFICAÇÃO v14.0.5] ---
+        
         for res in results:
             if res.link not in all_results:
                 all_results[res.link] = res
         await asyncio.sleep(1) # Pequena pausa para não sobrecarregar a API
 
     if not all_results:
-        print("Nenhuma notícia encontrada no Valor para hoje.")
+        print(f"Nenhuma notícia encontrada no Valor para a data {today_str}.")
         return [], set()
 
     # 3. Filtra apenas links novos
@@ -1072,7 +1075,7 @@ async def processar_dou_ia(
         None, description="JSON string de keywords"
     ),
 ):
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
@@ -1260,7 +1263,7 @@ async def root():
 
 @app.get("/test-ia")
 async def test_ia_endpoint():
-    # ... (Esta função permanece idêntica) ...
+    # ... (Esta função permanece idêntica à original) ...
     if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
