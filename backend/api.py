@@ -1002,7 +1002,7 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
         return [], set()
     genai.configure(api_key=GEMINI_API_KEY)
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash") # Modelo atualizado
+        model = genai.GenerativeModel("gemini-2.5-flash") # Modelo atualizado
     except Exception as e:
         print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
         return [], set()
@@ -1098,7 +1098,7 @@ async def processar_dou_ia(
             detail="A variável GEMINI_API_KEY não está definida.",
         )
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash") # Modelo atualizado
+        model = genai.GenerativeModel("gemini-2.5-flash") # Modelo atualizado
     except Exception as e:
         raise HTTPException(
             status_code=500,
