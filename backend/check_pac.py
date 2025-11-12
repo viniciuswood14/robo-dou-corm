@@ -2,12 +2,17 @@
 #
 # Módulo para monitorar dotações do Novo PAC
 # e alertar sobre mudanças.
+#
+# Versão 2.0:
+# - Envia relatório diário completo (Dotação + Empenhado).
+# - Destaca mudanças em relação ao dia anterior.
 
 import json
 import os
 import asyncio
 from typing import Dict, Set, List, Any, Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo # Para o fuso-horário
 
 # Importa o sender do Telegram
 from telegram import send_telegram_message
@@ -20,8 +25,7 @@ except ImportError:
     print("Por favor, adicione 'orcamentobr' ao seu requirements.txt")
     raise
 
-# --- 1. Mapeamento dos Programas e Ações (O "Cérebro") ---
-# Copiado do seu app.py (dashboard)
+# --- 1. Mapeamento dos Programas e Ações ---
 PROGRAMAS_ACOES = {
     'PROSUB': {
         '123G': 'IMPLANTACAO DE ESTALEIRO E BASE NAVAL',
@@ -37,27 +41,39 @@ PROGRAMAS_ACOES = {
 }
 
 # --- 2. Configuração do Estado ---
-# Um arquivo separado para guardar os últimos valores vistos
 STATE_FILE_PATH = os.environ.get("PAC_STATE_FILE_PATH", "/dados/pac_state.json")
 
 
-def load_pac_state() -> Dict[str, Dict[str, float]]:
+def load_pac_state() -> Dict[str, Dict[str, Dict[str, float]]]:
     """
     Carrega o estado (últimos valores por ano).
-    Formato: { "2024": {"123G": 100.0, "123H": 200.0}, "2025": {...} }
+    Formato: { "2024": {"123G": {"dotacao": 100.0, "empenhado": 50.0}, ...} }
     """
     try:
         with open(STATE_FILE_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Garante que os valores internos sejam floats
-            return {
-                ano: {acao: float(val) for acao, val in acoes.items()}
-                for ano, acoes in data.items()
-            }
+            # Validação simples da estrutura
+            if not isinstance(data, dict):
+                return {}
+            
+            final_state = {}
+            for ano, acoes in data.items():
+                if not isinstance(acoes, dict):
+                    continue
+                final_state[ano] = {}
+                for acao_cod, values in acoes.items():
+                    # Garante que a estrutura interna está correta
+                    if isinstance(values, dict) and "dotacao" in values and "empenhado" in values:
+                        final_state[ano][acao_cod] = {
+                            "dotacao": float(values.get("dotacao", 0.0)),
+                            "empenhado": float(values.get("empenhado", 0.0))
+                        }
+            return final_state
+            
     except (FileNotFoundError, json.JSONDecodeError):
         return {} # Retorna um dict vazio se não existir ou for inválido
 
-def save_pac_state(state: Dict[str, Dict[str, float]]):
+def save_pac_state(state: Dict[str, Dict[str, Dict[str, float]]]):
     """Salva o estado atual (valores por ano)."""
     try:
         with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f:
@@ -66,7 +82,7 @@ def save_pac_state(state: Dict[str, Dict[str, float]]):
         print(f"Erro Crítico: Falha ao salvar estado do PAC: {e}")
 
 
-# --- 3. Função de Busca de Dados (Copiada do app.py corrigido) ---
+# --- 3. Função de Busca de Dados (Sem alteração) ---
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     """
     Busca os dados de UMA ação, totalizados.
@@ -106,28 +122,27 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
         return None
 
 
-# --- 4. Função Principal de Verificação ---
-
+# --- 4. Função Auxiliar de Formatação ---
 def formatar_moeda(valor):
     """Formata um número como R$ 1.234,56"""
     if valor is None:
         return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+# --- 5. Função Principal de Verificação (LÓGICA ATUALIZADA) ---
 async def check_and_process_pac(ano_exercicio: str):
     """
     Função chamada pelo AGENDADOR (run_check.py).
-    Compara a dotação atual com a dotação salva e alerta sobre mudanças.
+    Envia relatório diário de Dotação/Empenhado e destaca mudanças.
     """
-    print(f"--- Iniciando verificação do PAC (Dotações) para o ano: {ano_exercicio} ---")
+    print(f"--- Iniciando Relatório Diário do PAC (Dotações) para o ano: {ano_exercicio} ---")
     
     # 1. Carrega o estado (valores antigos)
     full_state = load_pac_state()
-    previous_values = full_state.get(ano_exercicio, {})
+    previous_values_map = full_state.get(ano_exercicio, {})
     
     # 2. Busca os valores atuais
-    current_values: Dict[str, float] = {}
-    changes_found: List[str] = []
+    current_values_map: Dict[str, Dict[str, float]] = {}
     
     try:
         ano_int = int(ano_exercicio)
@@ -135,53 +150,84 @@ async def check_and_process_pac(ano_exercicio: str):
         print(f"Ano inválido para o PAC: {ano_exercicio}")
         return
 
-    # Loop por todos os programas e ações que queremos monitorar
+    # Primeiro, busca todos os dados atuais
     for programa, acoes in PROGRAMAS_ACOES.items():
-        for acao_cod, acao_desc in acoes.items():
-            
+        for acao_cod in acoes.keys():
             dados_linha = await buscar_dados_acao_pac(ano_int, acao_cod)
-            
-            # Pausa para não sobrecarregar a API
-            await asyncio.sleep(1) 
+            await asyncio.sleep(1) # Pausa para não sobrecarregar a API
             
             if dados_linha is None:
-                # Falha na busca, o erro já foi logado e enviado ao Telegram
-                continue
+                # Falha na busca, erro já enviado. Salva zero para não bugar o estado.
+                dotacao_atual = 0.0
+                empenhado_atual = 0.0
+            else:
+                dotacao_atual = float(dados_linha.get('loa_mais_credito', 0.0))
+                empenhado_atual = float(dados_linha.get('empenhado', 0.0))
 
-            # Pegamos a Dotação Atual (loa_mais_credito)
-            dotacao_atual = float(dados_linha.get('loa_mais_credito', 0.0))
-            current_values[acao_cod] = dotacao_atual
-            
-            # 3. Compara com o valor anterior
-            valor_antigo = float(previous_values.get(acao_cod, 0.0))
-            
-            if dotacao_atual != valor_antigo:
-                print(f"[PAC] MUDANÇA DETECTADA: {acao_cod}")
-                
-                # Monta a mensagem da mudança
-                change_msg = (
-                    f"*{acao_cod} - {acao_desc.upper()}*\n"
-                    f"Valor Anterior: {formatar_moeda(valor_antigo)}\n"
-                    f"Valor Novo: *{formatar_moeda(dotacao_atual)}*\n"
-                )
-                changes_found.append(change_msg)
+            current_values_map[acao_cod] = {
+                "dotacao": dotacao_atual,
+                "empenhado": empenhado_atual
+            }
 
-    # 4. Envia o alerta se houver mudanças
-    if changes_found:
-        print("Enviando alerta de mudança de dotação do PAC...")
-        
-        agora = datetime.now().strftime('%d/%m/%Y às %H:%M')
-        header = f"🔔 *Alerta de Alteração Orçamentária - Novo PAC* 🔔\n(Exercício: {ano_exercicio} - Verificado em: {agora})\n\n"
-        
-        message = header + "\n".join(changes_found)
-        
-        await send_telegram_message(message)
+    # 3. Monta o relatório comparando com o dia anterior
+    report_lines: List[str] = []
+    changes_found: bool = False
     
-    else:
-        print("Nenhuma alteração nas dotações do PAC detectada.")
+    for programa, acoes in PROGRAMAS_ACOES.items():
+        report_lines.append(f"\n*{programa}*") # Título do Programa
+        
+        for acao_cod, acao_desc in acoes.items():
+            
+            # Pega dados atuais (que acabamos de buscar)
+            current_data = current_values_map.get(acao_cod, {"dotacao": 0.0, "empenhado": 0.0})
+            dotacao_atual = current_data["dotacao"]
+            empenhado_atual = current_data["empenhado"]
 
-    # 5. Salva o estado atual (mesmo que não haja mudanças)
-    full_state[ano_exercicio] = current_values
+            # Pega dados antigos (do state salvo)
+            previous_data = previous_values_map.get(acao_cod, {"dotacao": 0.0, "empenhado": 0.0})
+            dotacao_antiga = previous_data["dotacao"]
+            empenhado_antigo = previous_data["empenhado"]
+
+            # Verifica mudanças
+            dotacao_mudou = dotacao_atual != dotacao_antiga
+            empenhado_mudou = empenhado_atual != empenhado_antigo
+            
+            if dotacao_mudou or empenhado_mudou:
+                changes_found = True
+
+            # Monta as linhas de texto para esta ação
+            report_lines.append(f"*{acao_cod} - {acao_desc.upper()}*")
+            
+            # Linha da Dotação
+            linha_dot = f"  Dotação: *{formatar_moeda(dotacao_atual)}*"
+            if dotacao_mudou:
+                linha_dot += f" (Ant: {formatar_moeda(dotacao_antiga)}) 🔺"
+            report_lines.append(linha_dot)
+
+            # Linha do Empenhado
+            linha_emp = f"  Empenhado: *{formatar_moeda(empenhado_atual)}*"
+            if empenhado_mudou:
+                linha_emp += f" (Ant: {formatar_moeda(empenhado_antigo)}) 🔺"
+            report_lines.append(linha_emp)
+            report_lines.append("") # Linha em branco para espaçar
+
+    # 4. Envia o relatório completo (TODOS OS DIAS)
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime('%d/%m/%Y às %H:%M')
+    
+    header = f"🗓️ *Relatório Diário de Dotações - Novo PAC* 🗓️\n(Exercício: {ano_exercicio} - Verificado em: {agora})\n"
+    
+    if changes_found:
+        header += "\n🔔 *Mudanças detectadas desde ontem!* 🔔"
+    else:
+        header += "\n✅ *Sem mudanças desde ontem.* ✅"
+    
+    message = header + "\n" + "\n".join(report_lines)
+    
+    await send_telegram_message(message)
+    print("Relatório diário do PAC enviado ao Telegram.")
+
+    # 5. Salva o estado atual para a comparação de amanhã
+    full_state[ano_exercicio] = current_values_map
     save_pac_state(full_state)
     
     print(f"--- Verificação do PAC (Dotações) finalizada ---")
