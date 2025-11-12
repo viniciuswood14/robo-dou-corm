@@ -1,7 +1,8 @@
 # Nome do arquivo: api.py
 # Versão: 14.0.5 (Filtro MF + Busca Valor)
+# + ADIÇÃO: Endpoint /api/pac-data (v1.0)
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Set, Dict, Any
@@ -20,6 +21,11 @@ import google.generativeai as genai
 # Importa a nova função de busca do 'google_search.py'
 from google_search import perform_google_search, SearchResult
 # --- [FIM DA MODIFICAÇÃO] ---
+
+# --- [ADIÇÃO PAC] ---
+import numpy as np
+from orcamentobr import despesa_detalhada
+# --- [FIM ADIÇÃO PAC] ---
 
 
 # =====================================================================================
@@ -237,7 +243,7 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
         lines.append("")
 
-        for p in pubs:
+        for p in subseq:
             lines.append(f"▶️ {p.organ or 'Órgão'}")
             lines.append(f"📌 {p.type or 'Ato/Portaria'}")
             if p.summary:
@@ -270,8 +276,8 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
 
 
 # --- [NOVO HELPER PARA O VALOR] ---
-def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    # ... (Esta função permanece idêntica à original) ...
+def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
+    """Gera o texto para o endpoint /processar-valor-ia"""
     meses_pt = {
         1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
         5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
@@ -286,59 +292,25 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     lines = []
     lines.append("Bom dia, senhores!")
     lines.append("")
-    lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
+    lines.append(f"PTC as seguintes publicações de interesse no Valor Econômico de {dd}:")
     lines.append("")
-
-    pubs_by_section: Dict[str, List[Publicacao]] = {}
-    for p in pubs:
-        sec = p.section or "DOU"
-        pubs_by_section.setdefault(sec, []).append(p)
 
     if not pubs:
         lines.append("— Sem ocorrências para os critérios informados —")
         return "\n".join(lines)
 
-    for section_name in sorted(pubs_by_section.keys()):
-        subseq = pubs_by_section[section_name]
-        if not subseq:
-            continue
+    for p in pubs:
+        lines.append(f"▶️ {p.titulo}")
+        lines.append(f"📌 {p.link}")
+        
+        reason = p.analise_ia or "Para conhecimento."
+        prefix = "⚓"
+        
+        if reason.startswith("Erro"):
+            prefix = "⚠️"
 
-        lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
+        lines.append(f"{prefix} {reason}")
         lines.append("")
-
-        # --- [CORREÇÃO APLICADA AQUI] ---
-        # O loop agora usa 'subseq' (a lista filtrada da seção)
-        # e não mais 'pubs' (a lista completa).
-        for p in subseq:
-        # --- [FIM DA CORREÇÃO] ---
-
-            lines.append(f"▶️ {p.organ or 'Órgão'}")
-            lines.append(f"📌 {p.type or 'Ato/Portaria'}")
-            if p.summary:
-                lines.append(p.summary)
-
-            reason = p.relevance_reason or "Para conhecimento."
-            prefix = "⚓"
-            
-            if (
-                reason.startswith("Erro na análise de IA:")
-                or reason.startswith("Erro GRAVE")
-                or reason.startswith("⚠️")
-            ):
-                prefix = "⚠️ Erro IA:"
-                reason = (
-                    reason.replace("Erro na análise de IA:", "")
-                    .replace("Erro GRAVE na análise de IA:", "")
-                    .replace("⚠️ IA ignorou impacto MPO:", "")
-                    .strip()
-                )
-
-            if "\n" in reason:
-                lines.append(f"{prefix}\n{reason}")
-            else:
-                lines.append(f"{prefix} {reason}")
-
-            lines.append("")
 
     return "\n".join(lines)
 # --- [FIM DO NOVO HELPER] ---
@@ -1030,7 +1002,7 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
         return [], set()
     genai.configure(api_key=GEMINI_API_KEY)
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash") # Modelo atualizado
     except Exception as e:
         print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
         return [], set()
@@ -1126,7 +1098,7 @@ async def processar_dou_ia(
             detail="A variável GEMINI_API_KEY não está definida.",
         )
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash") # Modelo atualizado
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1298,6 +1270,167 @@ async def processar_valor_ia(
 
 
 # =====================================================================================
+# NOVO ENDPOINT - DASHBOARD PAC v1.0
+# =====================================================================================
+
+# --- Mapeamento das Ações (O "Cérebro" do PAC) ---
+PROGRAMAS_ACOES_PAC = {
+    'PROSUB': {
+        '123G': 'IMPLANTACAO DE ESTALEIRO E BASE NAVAL',
+        '123H': 'CONSTRUCAO DE SUBMARINO DE PROPULSAO NUCLEAR',
+        '123I': 'CONSTRUCAO DE SUBMARINOS CONVENCIONAIS'
+    },
+    'PNM': {
+        '14T7': 'DESENVOLVIMENTO DE TECNOLOGIA NUCLEAR'
+    },
+    'PRONAPA': {
+        '1N47': 'CONSTRUCAO DE NAVIOS-PATRULHA 500T'
+    }
+}
+
+# --- Função de Busca (Adaptada do seu app.py) ---
+# NOTA: Esta função precisa ser 'async' para o FastAPI, 
+# mas a 'despesa_detalhada' não é. Vamos rodá-la em um thread.
+async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca os dados de UMA ação, totalizados.
+    """
+    print(f"[PAC API] Buscando dados para {ano}, Ação {acao_cod}...")
+    try:
+        # Roda a função síncrona 'despesa_detalhada' em um thread
+        df_detalhado = await asyncio.to_thread(
+            despesa_detalhada,
+            exercicio=ano,
+            acao=acao_cod,
+            inclui_descricoes=True,
+            ignore_secure_certificate=True
+        )
+        
+        if df_detalhado.empty:
+            return None
+            
+        colunas_numericas = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago']
+        colunas_para_somar = [col for col in colunas_numericas if col in df_detalhado.columns]
+        
+        if not colunas_para_somar:
+            return None
+            
+        totais_acao = df_detalhado[colunas_para_somar].sum()
+        
+        # Adiciona o código da Ação para referência
+        dados_finais = totais_acao.to_dict()
+        dados_finais['Acao_cod'] = acao_cod
+        return dados_finais
+
+    except Exception as e:
+        print(f"Erro ao consultar o SIOP (PAC API) para a ação {acao_cod}: {e}")
+        return None # Retorna None em vez de lançar exceção para o gather
+        
+@app.get("/api/pac-data/{ano}", summary="Busca dados de execução do PAC")
+async def get_pac_data(
+    ano: int = Path(..., description="Ano do exercício (ex: 2024)", ge=2010, le=2025)
+):
+    """
+    Endpoint para o frontend do dashboard PAC.
+    Busca os dados de todas as ações e retorna a tabela formatada como JSON.
+    """
+    
+    all_data = []
+    # Cria uma lista de tarefas para buscar dados em paralelo
+    tasks = []
+    
+    for programa, acoes in PROGRAMAS_ACOES_PAC.items():
+        for acao_cod in acoes.keys():
+            tasks.append(buscar_dados_acao_pac(ano, acao_cod))
+
+    # Executa todas as buscas
+    resultados_brutos = await asyncio.gather(*tasks)
+    
+    # Filtra dados brutos (remove None se houver falhas)
+    dados_brutos = [r for r in resultados_brutos if r is not None]
+    
+    if not dados_brutos:
+         raise HTTPException(
+            status_code=404,
+            detail=f"Nenhum dado encontrado para as ações do PAC em {ano}.",
+        )
+
+    # --- Monta a Tabela JSON para o Frontend ---
+    tabela_final = []
+    total_geral = {
+        'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'EMPENHADO (c)': 0.0,
+        'LIQUIDADO': 0.0, 'PAGO': 0.0
+    }
+
+    for programa, acoes in PROGRAMAS_ACOES_PAC.items():
+        # 1. Linha de Sumário do Programa
+        soma_programa = {
+            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'EMPENHADO (c)': 0.0,
+            'LIQUIDADO': 0.0, 'PAGO': 0.0
+        }
+        
+        linhas_acao_programa = []
+        
+        # 2. Linhas de Ação
+        for acao_cod, acao_desc in acoes.items():
+            # Encontra o dado bruto correspondente
+            row_data = next((d for d in dados_brutos if d.get('Acao_cod') == acao_cod), None)
+            
+            loa = row_data.get('loa', 0.0) if row_data else 0.0
+            dot_atual = row_data.get('loa_mais_credito', 0.0) if row_data else 0.0
+            empenhado = row_data.get('empenhado', 0.0) if row_data else 0.0
+            liquidado = row_data.get('liquidado', 0.0) if row_data else 0.0
+            pago = row_data.get('pago', 0.0) if row_data else 0.0
+
+            # Adiciona na linha da ação
+            linhas_acao_programa.append({
+                'PROGRAMA': None,
+                'AÇÃO': f"{acao_cod} - {acao_desc.upper()}",
+                'LOA': loa,
+                'DOTAÇÃO ATUAL': dot_atual,
+                'EMPENHADO (c)': empenhado,
+                'LIQUIDADO': liquidado,
+                'PAGO': pago,
+                '% EMP/DOT': (empenhado / dot_atual) if dot_atual else 0.0
+            })
+            
+            # Acumula no total do programa
+            soma_programa['LOA'] += loa
+            soma_programa['DOTAÇÃO ATUAL'] += dot_atual
+            soma_programa['EMPENHADO (c)'] += empenhado
+            soma_programa['LIQUIDADO'] += liquidado
+            soma_programa['PAGO'] += pago
+
+        # Adiciona a linha de total do programa
+        tabela_final.append({
+            'PROGRAMA': programa,
+            'AÇÃO': None,
+            **soma_programa,
+            '% EMP/DOT': (soma_programa['EMPENHADO (c)'] / soma_programa['DOTAÇÃO ATUAL']) if soma_programa['DOTAÇÃO ATUAL'] else 0.0
+        })
+        
+        # Adiciona as linhas de ação
+        tabela_final.extend(linhas_acao_programa)
+        
+        # Acumula no total geral
+        total_geral['LOA'] += soma_programa['LOA']
+        total_geral['DOTAÇÃO ATUAL'] += soma_programa['DOTAÇÃO ATUAL']
+        total_geral['EMPENHADO (c)'] += soma_programa['EMPENHADO (c)']
+        total_geral['LIQUIDADO'] += soma_programa['LIQUIDADO']
+        total_geral['PAGO'] += soma_programa['PAGO']
+        
+    # 3. Linha de Total Geral
+    tabela_final.append({
+        'PROGRAMA': 'Total Geral',
+        'AÇÃO': None,
+        **total_geral,
+        '% EMP/DOT': (total_geral['EMPENHADO (c)'] / total_geral['DOTAÇÃO ATUAL']) if total_geral['DOTAÇÃO ATUAL'] else 0.0
+    })
+
+    return tabela_final
+
+
+# =====================================================================================
 # HEALTHCHECK E TESTE IA
 # =====================================================================================
 
@@ -1314,7 +1447,7 @@ async def test_ia_endpoint():
             detail="GEMINI_API_KEY não configurada.",
         )
     try:
-        model = genai.GenerativeModel("gemini-2.5-pro")
+        model = genai.GenerativeModel("gemini-1.5-pro") # Modelo atualizado
     except Exception as e:
         raise HTTPException(
             status_code=500,
