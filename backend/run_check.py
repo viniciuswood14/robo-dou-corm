@@ -1,14 +1,12 @@
 # Nome do arquivo: run_check.py
-# Versão: 14.0.4 (Correção lógica de data do Valor + dias de semana)
+# Versão: 14.0.5 (Com monitoramento do PAC)
 
 import asyncio
 import json
 import os
 import time
-# --- [MODIFICAÇÃO v14.0.3] ---
 from datetime import datetime, timedelta
-# --- [FIM DA MODIFICAÇÃO] ---
-from zoneinfo import ZoneInfo # Para checar o fuso-horário
+from zoneinfo import ZoneInfo 
 from typing import Dict, List, Any, Set
 from bs4 import BeautifulSoup
 
@@ -44,12 +42,19 @@ except ImportError as e:
     print(f"Erro: Falha ao importar 'telegram.py'. Verifique o arquivo. Detalhe: {e}")
     raise
 
-# --- [NOVA IMPORTAÇÃO] ---
-# Importa a função principal do robô Valor
+# Importa a função do robô Valor
 try:
     from check_valor import check_and_process_valor
 except ImportError as e:
     print(f"Erro: Falha ao importar 'check_valor.py'. Verifique o arquivo. Detalhe: {e}")
+    raise
+
+# --- [NOVA IMPORTAÇÃO] ---
+# Importa a função do robô PAC
+try:
+    from check_pac import check_and_process_pac
+except ImportError as e:
+    print(f"Erro: Falha ao importar 'check_pac.py'. Verifique o arquivo. Detalhe: {e}")
     raise
 # --- [FIM DA NOVA IMPORTAÇÃO] ---
 
@@ -57,7 +62,7 @@ except ImportError as e:
 # --- CONFIGURAÇÃO DO ESTADO (DOU) ---
 STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "/dados/processed_state.json")
 
-# ... (as funções load_state e save_state continuam iguais) ...
+# ... (as funções load_state e save_state do DOU continuam iguais) ...
 def load_state() -> Dict[str, List[str]]:
     """Carrega o estado (ZIPs processados) do disco."""
     try:
@@ -270,25 +275,29 @@ async def main_loop():
     Loop principal que roda como um Background Worker.
     - Roda check_and_process_dou A CADA 10 MIN (das 5h às 23h)
     - Roda check_and_process_valor UMA VEZ POR DIA (às 5h10, de Seg a Sex)
+    - Roda check_and_process_pac UMA VEZ POR DIA (às 5h15, de Seg a Sex)
     """
     
     TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
     INTERVALO_SEGUNDOS = 10 * 60 # 10 minutos
     
-    valor_check_done_today = False 
+    # --- [FLAGS DE CONTROLE MODIFICADAS] ---
+    valor_check_done_today = False
+    pac_check_done_today = False # <-- NOVA FLAG
     last_check_day = None
+    # --- [FIM DA MODIFICAÇÃO] ---
     
-    print("--- Iniciando Robô (DOU + Valor) v14.0.4 em modo Background Worker ---")
+    print("--- Iniciando Robô (DOU + Valor + PAC) v14.0.5 em modo Background Worker ---")
 
     while True:
         # Pega a hora atual de Brasília no INÍCIO do ciclo
         agora_brasilia = datetime.now(TZ_BRASILIA)
         hora_atual = agora_brasilia.hour 
         minuto_atual = agora_brasilia.minute
-        data_hoje_brasilia = agora_brasilia.strftime('%Y-%m-%d')
         
-        # --- [MODIFICAÇÃO v14.0.3] ---
-        # Para o Valor, queremos checar o dia anterior (últimas 24h)
+        # --- [VARIÁVEIS DE DATA ATUALIZADAS] ---
+        data_hoje_brasilia = agora_brasilia.strftime('%Y-%m-%d')
+        ano_hoje_brasilia = agora_brasilia.strftime('%Y') # <-- NOVO
         data_ontem_brasilia = (agora_brasilia - timedelta(days=1)).strftime('%Y-%m-%d')
         # --- [FIM DA MODIFICAÇÃO] ---
 
@@ -296,6 +305,7 @@ async def main_loop():
         # Se o dia mudou, reseta os controles diários
         if last_check_day != data_hoje_brasilia:
             valor_check_done_today = False
+            pac_check_done_today = False # <-- RESET DA NOVA FLAG
             last_check_day = data_hoje_brasilia
             print(f"*** Novo dia detectado ({data_hoje_brasilia}). Resetando flags diárias. ***")
         
@@ -317,9 +327,7 @@ async def main_loop():
                     pass
             
             
-            # --- [MODIFICAÇÃO v14.0.4] ---
-            # Adiciona checagem de dia de semana (weekday < 5)
-            # 0 = Seg, 1 = Ter, 2 = Qua, 3 = Qui, 4 = Sex
+            # Checagem de dia de semana (weekday < 5)
             is_weekday = agora_brasilia.weekday() < 5
             
             # --- 2. Verificação do VALOR (Roda 1x por dia, após 5h10, em dias de semana) ---
@@ -327,7 +335,6 @@ async def main_loop():
                 
                 print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do Valor (5h10+, Dia de Semana). Iniciando checagem do dia anterior ({data_ontem_brasilia})... ***")
                 try:
-                    # Usa a data de ONTEM para a busca (correto devido ao 'after:')
                     await check_and_process_valor(data_ontem_brasilia)
                     
                     valor_check_done_today = True # Marca como feito para hoje
@@ -340,8 +347,30 @@ async def main_loop():
             elif (hora_atual == 5 and minuto_atual >= 10) and not is_weekday:
                 if not valor_check_done_today:
                     print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do Valor, mas é fim de semana. Pulando checagem do Valor.")
-                    valor_check_done_today = True # Marca como "feito" (pulado)
-            # --- [FIM DA MODIFICAÇÃO v14.0.4] ---
+                    valor_check_done_today = True 
+            
+
+            # --- [NOVO BLOCO - VERIFICAÇÃO DO PAC] ---
+            # Roda 1x por dia, após 5h15 (depois do Valor), em dias de semana
+            if (hora_atual == 5 and minuto_atual >= 15) and not pac_check_done_today and is_weekday:
+                
+                print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do PAC (5h15+, Dia de Semana). Iniciando checagem de dotações ({ano_hoje_brasilia})... ***")
+                try:
+                    # Usa o ANO ATUAL para a busca
+                    await check_and_process_pac(ano_hoje_brasilia)
+                    
+                    pac_check_done_today = True # Marca como feito para hoje
+                    print(f"*** Checagem do PAC concluída para {ano_hoje_brasilia}. ***")
+                
+                except Exception as e:
+                    print(f"Erro CRÍTICO no loop (check_and_process_pac): {e}")
+                    await send_telegram_message(f"Erro CRÍTICO no Robô PAC: {e}")
+            
+            elif (hora_atual == 5 and minuto_atual >= 15) and not is_weekday:
+                 if not pac_check_done_today:
+                    print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do PAC, mas é fim de semana. Pulando checagem do PAC.")
+                    pac_check_done_today = True
+            # --- [FIM DO NOVO BLOCO] ---
 
             
         else:
