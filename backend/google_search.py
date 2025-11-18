@@ -49,7 +49,7 @@ async def perform_google_search(query: str, search_date: str) -> List[SearchResu
         return []
 
     # Removemos o "after:" da query e usamos o parâmetro 'sort'
-    full_query = f"{query} site:valor.globo.com"
+    full_query = f"{query} site:valor.globo.com/impresso"
     
     params = {
         "key": GOOGLE_API_KEY,
