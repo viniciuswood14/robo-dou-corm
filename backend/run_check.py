@@ -330,15 +330,17 @@ async def main_loop():
             # Checagem de dia de semana (weekday < 5)
             is_weekday = agora_brasilia.weekday() < 5
                                
+           # [Original - run_check.py]
+
             # --- 2. Verificação do VALOR (Roda 1x por dia, após 5h10, em dias de semana) ---
-            if (hora_atual == 5 and minuto_atual >= 30) and not valor_check_done_today and is_weekday:
+            if (hora_atual == 5 and minuto_atual >= 10) and not valor_check_done_today and is_weekday:
                 
-                print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do Valor (5h10+, Dia de Semana). Iniciando checagem do dia ATUAL ({data_hoje_brasilia})... ***")
+                print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do Valor (5h10+, Dia de Semana). Iniciando checagem do dia anterior ({data_ontem_brasilia})... ***")
                 try:
-                    await check_and_process_valor(data_hoje_brasilia)
+                    await check_and_process_valor(data_ontem_brasilia)
                     
                     valor_check_done_today = True # Marca como feito para hoje
-                    print(f"*** Checagem do Valor concluída para {data_hoje_brasilia}. ***")
+                    print(f"*** Checagem do Valor concluída para {data_ontem_brasilia}. ***")
                 
                 except Exception as e:
                     print(f"Erro CRÍTICO no loop (check_and_process_valor): {e}")
@@ -349,7 +351,6 @@ async def main_loop():
                     print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do Valor, mas é fim de semana. Pulando checagem do Valor.")
                     valor_check_done_today = True 
             
-
             # --- [NOVO BLOCO - VERIFICAÇÃO DO PAC] ---
             # Roda 1x por dia, após 5h15 (depois do Valor), em dias de semana
             if (hora_atual == 5 and minuto_atual >= 15) and not pac_check_done_today and is_weekday:
@@ -371,7 +372,6 @@ async def main_loop():
                     print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do PAC, mas é fim de semana. Pulando checagem do PAC.")
                     pac_check_done_today = True
             # --- [FIM DO NOVO BLOCO] ---
-
             
         else:
             print(f"[{agora_brasilia.strftime('%H:%M:%S')}] Fora de expediente (Hora: {hora_atual}h). Pulando esta verificação.")
