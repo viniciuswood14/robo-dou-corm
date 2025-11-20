@@ -1,12 +1,11 @@
 # Nome do arquivo: api.py
-# Versão: 14.0.5 (Filtro MF + Busca Valor + PAC v1.1)
+# Versão: 14.0.6 (COMPLETO - DOU + Valor + PAC Histórico + Correção de Rotas)
 
 from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
-from check_pac import update_pac_historical_cache
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
 import asyncio
@@ -24,13 +23,17 @@ from google_search import perform_google_search, SearchResult
 import numpy as np
 from orcamentobr import despesa_detalhada
 
+# Importa a função de atualização do cache (para o endpoint manual)
+# Certifique-se de que check_pac.py está no mesmo diretório
+from check_pac import update_pac_historical_cache
+
 
 # =====================================================================================
-# Robô DOU/Valor/PAC API
+# Robô DOU/Valor API
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v14.0.5"
+    title="Robô DOU/Valor API - v14.0.6"
 )
 
 app.add_middleware(
@@ -69,29 +72,25 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", config.get("GEMINI_API_KEY", None))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Constantes auxiliares (templates e listas de palavras-chave)
+# Constantes auxiliares
 TEMPLATE_LME = config.get("TEMPLATE_LME", "")
 TEMPLATE_FONTE = config.get("TEMPLATE_FONTE", "")
 TEMPLATE_CREDITO = config.get("TEMPLATE_CREDITO", "")
 ANNOTATION_POSITIVE_GENERIC = config.get("ANNOTATION_POSITIVE_GENERIC", "")
 ANNOTATION_NEGATIVE = config.get("ANNOTATION_NEGATIVE", "")
 
-MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})  # códigos UO -> nome
+MPO_NAVY_TAGS = config.get("MPO_NAVY_TAGS", {})
 KEYWORDS_DIRECT_INTEREST_S1 = config.get("KEYWORDS_DIRECT_INTEREST_S1", [])
 BUDGET_KEYWORDS_S1 = config.get("BUDGET_KEYWORDS_S1", [])
-MPO_ORG_STRING = config.get(
-    "MPO_ORG_STRING", "ministério do planejamento e orçamento"
-)
+MPO_ORG_STRING = config.get("MPO_ORG_STRING", "ministério do planejamento e orçamento")
 PERSONNEL_ACTION_VERBS = config.get("PERSONNEL_ACTION_VERBS", [])
 TERMS_AND_ACRONYMS_S2 = config.get("TERMS_AND_ACRONYMS_S2", [])
-NAMES_TO_TRACK = sorted(
-    list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower
-)
+NAMES_TO_TRACK = sorted(list(set(config.get("NAMES_TO_TRACK", []))), key=str.lower)
 
 # PATHS
 HISTORICAL_CACHE_PATH = os.environ.get("PAC_HISTORICAL_CACHE_PATH", "/dados/pac_historical_dotacao.json")
 
-# PROMPTS IA (DOU)
+# PROMPTS IA
 GEMINI_MASTER_PROMPT = """
 Você é um analista de orçamento e finanças do Comando da Marinha do Brasil, especialista em legislação e defesa.
 Sua tarefa é ler a publicação do Diário Oficial da União (DOU) abaixo e escrever uma única frase curta (máximo 2 linhas) para um relatório de WhatsApp, focando exclusivamente no impacto para a Marinha do Brasil (MB).
@@ -129,7 +128,6 @@ Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi mar
 TEXTO DA PUBLICAÇÃO:
 """
 
-# --- CONFIGS DO VALOR ---
 SEARCH_QUERIES = [
     # Query 1: Termos de Política Fiscal Macro
     '"contas publicas" OR "politica fiscal" OR "Arcabouço fiscal" OR "Teto de gastos" OR "Meta fiscal" OR "Resultado primário" OR "Resultado nominal" OR "Dívida Pública" OR "Gastos Públicos" OR "Arrecadação" OR "Reforma tributária" OR "Incentivos fiscais"',
@@ -176,7 +174,6 @@ class ProcessResponse(BaseModel):
     publications: List[Publicacao]
     whatsapp_text: str
 
-# --- NOVOS MODELOS PARA O VALOR ---
 class ValorPublicacao(BaseModel):
     titulo: str
     link: str
@@ -317,8 +314,24 @@ MB_UOS = {
     "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
     "52000": "Ministério da Defesa",
 }
-
+def _clean_text_local(t: str) -> str:
+    if t is None:
+        return ""
+    return re.sub(r"\s+", " ", t).strip()
+def _parse_money(raw: str) -> int:
+    raw = _clean_text_local(raw)
+    if not raw:
+        return 0
+    raw = raw.replace(".", "").replace(",", "")
+    m = re.findall(r"\d+", raw)
+    if not m:
+        return 0
+    try:
+        return int("".join(m))
+    except:
+        return 0
 def parse_mpo_budget_table(full_text_content: str) -> str:
+    # ... (Esta função permanece idêntica à original) ...
     def _clean_text_local(t: str) -> str:
         if t is None:
             return ""
@@ -335,7 +348,15 @@ def parse_mpo_budget_table(full_text_content: str) -> str:
             return int("".join(m))
         except:
             return 0
-
+    MB_UOS = {
+        "52131": "Comando da Marinha",
+        "52133": "Secretaria da Comissão Interministerial para os Recursos do Mar",
+        "52232": "Caixa de Construções de Casas para o Pessoal da Marinha - CCCPM",
+        "52233": "Amazônia Azul Tecnologias de Defesa S.A. - AMAZUL",
+        "52931": "Fundo Naval",
+        "52932": "Fundo de Desenvolvimento do Ensino Profissional Marítimo",
+        "52000": "Ministério da Defesa",
+    }
     ORGAO_REGEX = re.compile(
         r"ÓRGÃO(?:\s+\w+)?\s*:\s*(\d+)\s*-\s*(.+)",
         flags=re.IGNORECASE
@@ -510,7 +531,7 @@ def process_grouped_materia(
     full_text_content: str,
     custom_keywords: List[str],
 ) -> Optional[Publicacao]:
-    # (Filtro MF)
+    # --- [MODIFICAÇÃO v14.0.2 - Filtro MF] ---
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
     if (
@@ -616,7 +637,7 @@ def process_grouped_materia(
                         or "Publicação potencialmente relevante para a Marinha. Recomenda-se análise detalhada."
                     )
 
-        # --- ETAPA 2: Keywords de Interesse Direto ---
+        # --- ETAPA 2: Keywords de Interesse Direto (Ex: "Comando da Marinha") ---
         if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw in search_content_lower:
@@ -634,6 +655,7 @@ def process_grouped_materia(
                         or "Ato orçamentário do MPO, mas não foi possível confirmar impacto direto na Marinha."
                     )
                 else:
+                    # É MF e tem keyword de orçamento (Nova lógica v14.0.2)
                     reason = "Ato orçamentário do Ministério da Fazenda com potencial impacto orçamentário."
 
     elif "DO2" in section:
@@ -1255,8 +1277,35 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
 
     except Exception as e:
         print(f"Erro ao consultar o SIOP (PAC API) para a ação {acao_cod}: {e}")
-        return None 
-        
+        return None # Retorna None em vez de lançar exceção para o gather
+
+
+# [NOVO ENDPOINT - INÍCIO]
+# Este endpoint deve vir ANTES do endpoint /{ano} para evitar o conflito "integer parsing"
+@app.get("/api/pac-data/historical-dotacao", summary="Busca dados históricos de dotação (2010-2025) para o gráfico")
+async def get_pac_historical_data():
+    """
+    Endpoint para o gráfico principal do dashboard PAC.
+    Lê o arquivo JSON pré-compilado pelo robô (check_pac.py).
+    """
+    try:
+        with open(HISTORICAL_CACHE_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Arquivo de cache histórico não encontrado. O robô pode estar gerando o arquivo pela primeira vez. Tente novamente em alguns minutos."
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao ler o arquivo de cache: {e}"
+        )
+# [NOVO ENDPOINT - FIM]
+
+
+# Endpoint genérico para ano específico (DEVE vir DEPOIS do historical-dotacao)
 @app.get("/api/pac-data/{ano}", summary="Busca dados de execução do PAC por ano")
 async def get_pac_data(
     ano: int = Path(..., description="Ano do exercício (ex: 2010)", ge=2010, le=2025)
@@ -1358,8 +1407,9 @@ async def get_pac_data(
     })
 
     return tabela_final
-# Adicione isso no api.py, antes do @app.get("/")
 
+
+# [NOVO ENDPOINT MANUAL]
 @app.post("/api/admin/force-update-pac")
 async def force_update_pac():
     """
@@ -1369,28 +1419,6 @@ async def force_update_pac():
     print("Forçando atualização do cache histórico do PAC...")
     await update_pac_historical_cache()
     return {"status": "Cache histórico atualizado com sucesso! Recarregue o dashboard."}
-
-# [NOVO ENDPOINT - DADOS HISTÓRICOS PARA GRÁFICO]
-@app.get("/api/pac-data/historical-dotacao", summary="Busca dados históricos de dotação (2010-2025) para o gráfico")
-async def get_pac_historical_data():
-    """
-    Endpoint para o gráfico principal do dashboard PAC.
-    Lê o arquivo JSON pré-compilado pelo robô (check_pac.py).
-    """
-    try:
-        with open(HISTORICAL_CACHE_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail="Arquivo de cache histórico não encontrado. O robô pode estar gerando o arquivo pela primeira vez. Tente novamente em alguns minutos."
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao ler o arquivo de cache: {e}"
-        )
 
 
 # =====================================================================================
