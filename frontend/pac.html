@@ -6,6 +6,9 @@
   <title>Dashboard PAC - CORM</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="icon" href="favicon.ico" type="image/x-icon">
+  
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
   <style>
     /* Estilos específicos para a tabela do PAC */
     .table-container {
@@ -62,6 +65,16 @@
     .pac-table .num {
         text-align: right;
     }
+
+    /* Estilo para o container do gráfico */
+    .chart-container {
+      position: relative;
+      height: 450px; /* Altura do gráfico */
+      width: 100%;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border-color);
+    }
   </style>
 </head>
 <body>
@@ -72,9 +85,17 @@
       <h1>Dashboard de Execução do PAC</h1>
     </header>
 
+    <div class="chart-container">
+      <canvas id="pacChart"></canvas>
+    </div>
+    
+    <p class="hint" style="text-align: center; margin-top: -40px; margin-bottom: 24px;">
+      Clique em um ano no gráfico acima para ver a tabela detalhada de execução.
+    </p>
+
     <div class="row" style="max-width: 200px;">
       <label for="ano">Selecione o Ano</label>
-      <input id="ano" type="number" value="2024" />
+      <input id="ano" type="number" value="2025" />
     </div>
 
     <div class="actions">
