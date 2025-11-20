@@ -3,9 +3,10 @@
 # Módulo para monitorar dotações do Novo PAC
 # e alertar sobre mudanças.
 #
-# Versão 2.0:
+# Versão 2.1:
 # - Envia relatório diário completo (Dotação + Empenhado).
 # - Destaca mudanças em relação ao dia anterior.
+# - Gera cache histórico (2010-2025) para o dashboard.
 
 import json
 import os
@@ -30,7 +31,7 @@ PROGRAMAS_ACOES = {
     'PROSUB': {
         '123G': 'IMPLANTACAO DE ESTALEIRO E BASE NAVAL',
         '123H': 'CONSTRUCAO DE SUBMARINO DE PROPULSAO NUCLEAR',
-        '123I': 'CONSTRUCAODE SUBMARINOS CONVENCIONAIS'
+        '123I': 'CONSTRUCAO DE SUBMARINOS CONVENCIONAIS'
     },
     'PNM': {
         '14T7': 'DESENVOLVIMENTO DE TECNOLOGIA NUCLEAR'
@@ -42,6 +43,7 @@ PROGRAMAS_ACOES = {
 
 # --- 2. Configuração do Estado ---
 STATE_FILE_PATH = os.environ.get("PAC_STATE_FILE_PATH", "/dados/pac_state.json")
+HISTORICAL_CACHE_PATH = os.environ.get("PAC_HISTORICAL_CACHE_PATH", "/dados/pac_historical_dotacao.json")
 
 
 def load_pac_state() -> Dict[str, Dict[str, Dict[str, float]]]:
@@ -81,8 +83,16 @@ def save_pac_state(state: Dict[str, Dict[str, Dict[str, float]]]):
     except Exception as e:
         print(f"Erro Crítico: Falha ao salvar estado do PAC: {e}")
 
+def save_pac_historical_cache(data: Dict[str, Any]):
+    """Salva o cache de dados históricos (para o gráfico)."""
+    try:
+        with open(HISTORICAL_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Erro Crítico: Falha ao salvar cache histórico do PAC: {e}")
 
-# --- 3. Função de Busca de Dados (Sem alteração) ---
+
+# --- 3. Função de Busca de Dados ---
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     """
     Busca os dados de UMA ação, totalizados.
@@ -121,6 +131,55 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
         await send_telegram_message(f"⚠️ Erro no Robô PAC:\nFalha ao consultar SIOP para Ação {acao_cod} (Ano {ano}).\nErro: {e}")
         return None
 
+# --- Nova Função de Cache Histórico ---
+async def update_pac_historical_cache():
+    """
+    Gera o cache de dotações (LOA + Créditos) de 2010 a 2025.
+    Executa uma vez por dia, chamado pelo check_and_process_pac.
+    """
+    print("[PAC Cache Histórico] Iniciando geração do cache de 2010-2025...")
+    
+    YEAR_START = 2010
+    YEAR_END = 2025 # Garante que o ano atual esteja incluído
+
+    # Estrutura de dados otimizada para Chart.js
+    labels = list(range(YEAR_START, YEAR_END + 1))
+    datasets_map: Dict[str, Dict[str, Any]] = {}
+    
+    # Prepara os datasets
+    for programa, acoes in PROGRAMAS_ACOES.items():
+        for acao_cod, acao_desc in acoes.items():
+            label_completo = f"{acao_cod} - {acao_desc.upper()}"
+            datasets_map[acao_cod] = {
+                "label": label_completo,
+                "data": [0.0] * len(labels) # Inicializa todos os anos com 0.0
+            }
+
+    # Loop principal (16 anos * 5 ações = 80 queries)
+    for i, ano in enumerate(labels):
+        print(f"[PAC Cache Histórico] Processando ano: {ano}...")
+        for acao_cod in datasets_map.keys():
+            try:
+                dados_linha = await buscar_dados_acao_pac(ano, acao_cod)
+                await asyncio.sleep(0.5) # Pausa leve para não sobrecarregar API
+                
+                if dados_linha:
+                    dotacao_atual = float(dados_linha.get('loa_mais_credito', 0.0))
+                    # Atualiza o valor para este ano no índice correto
+                    datasets_map[acao_cod]["data"][i] = dotacao_atual
+            except Exception as e:
+                print(f"[PAC Cache Histórico] Erro ao buscar {acao_cod} para {ano}: {e}")
+                # Mantém 0.0 se falhar
+
+    # Formato final do JSON
+    chart_data = {
+        "labels": labels,
+        "datasets": list(datasets_map.values())
+    }
+    
+    save_pac_historical_cache(chart_data)
+    print("[PAC Cache Histórico] Cache histórico salvo com sucesso.")
+
 
 # --- 4. Função Auxiliar de Formatação ---
 def formatar_moeda(valor):
@@ -129,7 +188,7 @@ def formatar_moeda(valor):
         return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# --- 5. Função Principal de Verificação (LÓGICA ATUALIZADA) ---
+# --- 5. Função Principal de Verificação ---
 async def check_and_process_pac(ano_exercicio: str):
     """
     Função chamada pelo AGENDADOR (run_check.py).
@@ -229,5 +288,8 @@ async def check_and_process_pac(ano_exercicio: str):
     # 5. Salva o estado atual para a comparação de amanhã
     full_state[ano_exercicio] = current_values_map
     save_pac_state(full_state)
+
+    # 6. Atualiza o cache histórico para o gráfico
+    await update_pac_historical_cache()
     
     print(f"--- Verificação do PAC (Dotações) finalizada ---")
