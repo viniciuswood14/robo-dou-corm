@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
+from check_pac import update_pac_historical_cache
 import os, io, zipfile, json, re
 from urllib.parse import urljoin
 import asyncio
@@ -1357,7 +1358,17 @@ async def get_pac_data(
     })
 
     return tabela_final
+# Adicione isso no api.py, antes do @app.get("/")
 
+@app.post("/api/admin/force-update-pac")
+async def force_update_pac():
+    """
+    Endpoint manual para forçar a geração do JSON histórico AGORA.
+    Útil para popular o gráfico imediatamente após o deploy.
+    """
+    print("Forçando atualização do cache histórico do PAC...")
+    await update_pac_historical_cache()
+    return {"status": "Cache histórico atualizado com sucesso! Recarregue o dashboard."}
 
 # [NOVO ENDPOINT - DADOS HISTÓRICOS PARA GRÁFICO]
 @app.get("/api/pac-data/historical-dotacao", summary="Busca dados históricos de dotação (2010-2025) para o gráfico")
