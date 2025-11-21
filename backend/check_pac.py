@@ -42,8 +42,8 @@ PROGRAMAS_ACOES = {
 }
 
 # --- 2. Configuração do Estado ---
-STATE_FILE_PATH = os.environ.get("PAC_STATE_FILE_PATH", "/dados/pac_state.json")
-HISTORICAL_CACHE_PATH = os.environ.get("PAC_HISTORICAL_CACHE_PATH", "/dados/pac_historical_dotacao.json")
+STATE_FILE_PATH = os.environ.get("PAC_STATE_FILE_PATH", "pac_state.json")
+HISTORICAL_CACHE_PATH = os.environ.get("PAC_HISTORICAL_CACHE_PATH", "pac_historical_dotacao.json")
 
 
 def load_pac_state() -> Dict[str, Dict[str, Dict[str, float]]]:
