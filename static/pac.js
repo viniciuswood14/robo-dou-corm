@@ -1,7 +1,7 @@
 document.addEventListener("DOMContentLoaded", function() {
 
   // 👉 Aponte para a URL do seu backend no Render:
-  const API_BASE = "https://robo-dou-corm-backend.onrender.com";
+  const API_BASE = "";
 
   const el = (id) => document.getElementById(id);
   const btnConsultar = el("btnConsultarPAC");
