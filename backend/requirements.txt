@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-httpx
-python-multipart
-beautifulsoup4
-lxml
-google-generativeai
-google-api-python-client
-orcamentobr
