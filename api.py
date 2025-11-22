@@ -988,7 +988,7 @@ async def get_ai_analysis(
 
 
 # =====================================================================================
-# FUNÇÃO DE ANÁLISE DO VALOR
+# FUNÇÃO DE ANÁLISE DO VALOR (CORRIGIDA PARA IGNORAR A CAPA)
 # =====================================================================================
 async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Dict[str, Any]], Set[str]):
     """
@@ -1007,62 +1007,63 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
         print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
         return [], set()
 
-    # 1. Carrega o estado (links já vistos)
-    if use_state:
-        pass
-    
+    # 1. Prepara o filtro da Capa
+    # Transforma '2025-11-22' em '20251122' para identificar o link da capa
+    date_url_suffix = today_str.replace("-", "") 
+
     # 2. Busca os links de hoje
     all_results: Dict[str, SearchResult] = {}
     
     for query in SEARCH_QUERIES:
         print(f"Buscando query: {query} para a data {today_str}")
         
+        # perform_google_search vem de google_search.py
         results = await perform_google_search(query, search_date=today_str)
         
         for res in results:
+            # [CORREÇÃO] Filtro Anti-Capa:
+            # Se o link for exatamente a capa (ex: .../impresso/20251122/), IGNORA.
+            # Queremos apenas as notícias internas.
+            if res.link.rstrip("/").endswith(date_url_suffix):
+                continue
+                
             if res.link not in all_results:
                 all_results[res.link] = res
+        
+        # Pausa leve para não estourar limites da API Google muito rápido
         await asyncio.sleep(1) 
-
-    if not all_results:
-        print(f"Nenhuma notícia encontrada no Valor para a data {today_str}.")
-        return [], set()
 
     results_to_process = list(all_results.values())
 
     if not results_to_process:
-        print("Nenhuma notícia *nova* encontrada no Valor (ou já processada).")
+        print(f"Nenhuma notícia específica encontrada (Capa ignorada) para {today_str}.")
         return [], set()
     
-    print(f"Encontradas {len(results_to_process)} notícias no Valor. Analisando com IA...")
+    print(f"Encontradas {len(results_to_process)} notícias específicas. Analisando com IA...")
 
     # 4. Analisa com IA
     pubs_finais = []
     links_encontrados = set()
 
     for res in results_to_process:
-        prompt = GEMINI_VALOR_PROMPT.format(titulo=res.title, resumo=res.snippet)
-        
+        # Prompt reforçado com Título e Snippet específico da matéria
         ai_reason = await get_ai_analysis(
-            clean_text=f"TÍTULO: {res.title}\nSNIPPET: {res.snippet}",
+            clean_text=f"TÍTULO DA MATÉRIA: {res.title}\nRESUMO: {res.snippet}",
             model=model,
             prompt_template=GEMINI_VALOR_PROMPT
         )
         
         links_encontrados.add(res.link)
 
-        if ai_reason:
+        # Filtra respostas negativas da IA
+        if ai_reason and "sem impacto" not in ai_reason.lower():
             pubs_finais.append({
                 "titulo": res.title,
                 "link": res.link,
                 "analise_ia": ai_reason
             })
 
-    if not pubs_finais:
-        print("Análise da IA não retornou nenhuma razão.")
-        return [], links_encontrados
-
-    # 5. Retorna os resultados brutos
+    # 5. Retorna os resultados
     return pubs_finais, links_encontrados
 
 
