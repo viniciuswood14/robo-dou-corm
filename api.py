@@ -1,9 +1,9 @@
 # Nome do arquivo: api.py
-# Versão: 15.0.3 (UNIFICADO: Seu código original + Frontend + Worker)
+# Versão: 15.0.4 (FINAL - Seu Código Original + Frontend + Worker + Crawler Valor)
 
 from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles # <--- ADICIONADO PARA O SITE
+from fastapi.staticfiles import StaticFiles # <--- ADIÇÃO 1: Servir arquivos estáticos
 from pydantic import BaseModel
 from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 # IA / Gemini
 import google.generativeai as genai
 
-# Importa a nova função de busca do 'google_search.py'
+# Importa a função de busca do 'google_search.py'
 from google_search import perform_google_search, SearchResult
 
 # Importações PAC
@@ -32,7 +32,7 @@ from check_pac import update_pac_historical_cache
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v15.0.3 (Unificado)"
+    title="Robô DOU/Valor API - v15.0.4"
 )
 
 app.add_middleware(
@@ -44,22 +44,23 @@ app.add_middleware(
 )
 
 # =====================================================================================
-# 1. WORKER EM BACKGROUND (NOVA ADIÇÃO)
+# 1. WORKER EM BACKGROUND (O "CORAÇÃO" DO ROBÔ)
 # =====================================================================================
-# Isso faz o robô acordar assim que o site for ligado no Render
+# Isso faz o robô (run_check.py) começar a rodar assim que o site sobe no Render
 @app.on_event("startup")
 async def startup_event():
     print(">>> SISTEMA UNIFICADO INICIADO: API + SITE + ROBÔ <<<")
     try:
-        # Importação tardia para evitar ciclo
+        # Importação feita aqui dentro para evitar erro de ciclo
         from run_check import main_loop
-        # Dispara o loop infinito em background
+        # Cria a tarefa em background
         asyncio.create_task(main_loop())
-        print(">>> Robô de monitoramento iniciado em background.")
+        print(">>> Loop de verificação (run_check) iniciado com sucesso.")
     except ImportError:
         print("⚠️ AVISO: 'run_check.py' não encontrado. O robô automático não rodará.")
     except Exception as e:
-        print(f"⚠️ ERRO CRÍTICO NO ROBÔ: {e}")
+        print(f"⚠️ ERRO AO INICIAR ROBÔ: {e}")
+
 
 # =====================================================================================
 # CONFIG
@@ -69,10 +70,9 @@ try:
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
 except FileNotFoundError:
-    # Se não achar config.json (no Render), usa um dict vazio e confia nas ENV vars
+    # Se não tiver arquivo, usa vazio (confia nas ENV VARS do Render)
     config = {}
 except json.JSONDecodeError:
-    print("Erro: Falha ao decodificar 'config.json'.")
     config = {}
 
 # Credenciais / URLs InLabs
@@ -163,6 +163,7 @@ Sua tarefa é ler o TÍTULO e o RESUMO (snippet) de uma notícia do Valor Econô
 
 - Se for sobre Orçamento Federal, LDO, LOA, Teto de Gastos, Arcabouço Fiscal, etc., diga o impacto.
 - Se for sobre Fundos Públicos, analise se afeta a Marinha (Fundo Naval) ou o orçamento.
+- Se o título for genérico (ex: "Edição Impressa"), ignore.
 
 TÍTULO: {titulo}
 RESUMO: {resumo}
@@ -988,7 +989,49 @@ async def get_ai_analysis(
 
 
 # =====================================================================================
-# FUNÇÃO DE ANÁLISE DO VALOR (CORRIGIDA PARA IGNORAR A CAPA)
+# FUNÇÕES AUXILIARES PARA O VALOR (CRAWLER)
+# =====================================================================================
+
+async def crawl_valor_headlines(cover_url: str, date_str: str) -> List[Dict[str, str]]:
+    """
+    Acessa a página da capa e extrai os links das notícias do dia.
+    """
+    print(f"[Valor Crawler] Acessando capa: {cover_url}")
+    found_articles = []
+    date_clean = date_str.replace("-", "") # YYYYMMDD
+    
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            r = await client.get(cover_url, headers=headers)
+            if r.status_code != 200:
+                print(f"[Valor Crawler] Falha ao acessar capa: {r.status_code}")
+                return []
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                title = norm(a.get_text())
+                
+                # Filtra apenas links que são notícias internas dessa data
+                if date_clean in href and len(href) > len(f"/impresso/{date_clean}/"):
+                    full_link = href if href.startswith("http") else f"https://valor.globo.com{href}"
+                    
+                    if title and len(title) > 10 and not any(f['link'] == full_link for f in found_articles):
+                         found_articles.append({"title": title, "link": full_link})
+                         
+            print(f"[Valor Crawler] Encontradas {len(found_articles)} notícias dentro da capa.")
+            return found_articles
+
+        except Exception as e:
+            print(f"[Valor Crawler] Erro: {e}")
+            return []
+
+# =====================================================================================
+# FUNÇÃO DE ANÁLISE DO VALOR (ATUALIZADA COM CRAWLER)
 # =====================================================================================
 async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Dict[str, Any]], Set[str]):
     """
@@ -996,74 +1039,80 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
     Busca, analisa com IA e retorna uma lista de publicações relevantes.
     """
     
-    # 0. Configura a IA
     if not GEMINI_API_KEY:
         print("Erro (Valor): GEMINI_API_KEY não encontrada.")
         return [], set()
     genai.configure(api_key=GEMINI_API_KEY)
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash") # Modelo atualizado
+        model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
         print(f"Falha (Valor) ao inicializar o modelo de IA: {e}")
         return [], set()
 
-    # 1. Prepara o filtro da Capa
-    # Transforma '2025-11-22' em '20251122' para identificar o link da capa
-    date_url_suffix = today_str.replace("-", "") 
+    date_suffix = today_str.replace("-", "") # 20251121
 
-    # 2. Busca os links de hoje
-    all_results: Dict[str, SearchResult] = {}
-    
-    for query in SEARCH_QUERIES:
-        print(f"Buscando query: {query} para a data {today_str}")
-        
-        # perform_google_search vem de google_search.py
-        results = await perform_google_search(query, search_date=today_str)
-        
-        for res in results:
-            # [CORREÇÃO] Filtro Anti-Capa:
-            # Se o link for exatamente a capa (ex: .../impresso/20251122/), IGNORA.
-            # Queremos apenas as notícias internas.
-            if res.link.rstrip("/").endswith(date_url_suffix):
-                continue
-                
-            if res.link not in all_results:
-                all_results[res.link] = res
-        
-        # Pausa leve para não estourar limites da API Google muito rápido
+    # 1. Busca no Google
+    google_results = []
+    for q in SEARCH_QUERIES:
+        print(f"Buscando query: {q} para a data {today_str}")
+        try:
+            res = await perform_google_search(q, search_date=today_str)
+            google_results.extend(res)
+        except: pass
         await asyncio.sleep(1) 
+    
+    final_articles_to_analyze = []
+    processed_links = set()
+    
+    # 2. Processa resultados do Google (Crawler se achar capa)
+    for res in google_results:
+        # Se for a CAPA (termina com a data), aciona o CRAWLER
+        if res.link.rstrip("/").endswith(date_suffix):
+            print(f"⚠️ Capa detectada ({res.link}). Iniciando Crawler...")
+            crawled_news = await crawl_valor_headlines(res.link, today_str)
+            for news in crawled_news:
+                if news['link'] not in processed_links:
+                    final_articles_to_analyze.append(news)
+                    processed_links.add(news['link'])
+        else:
+            # É um link direto de notícia
+            if res.link not in processed_links:
+                final_articles_to_analyze.append({"title": res.title, "link": res.link})
+                processed_links.add(res.link)
 
-    results_to_process = list(all_results.values())
-
-    if not results_to_process:
-        print(f"Nenhuma notícia específica encontrada (Capa ignorada) para {today_str}.")
+    if not final_articles_to_analyze:
+        print("Nenhuma notícia específica encontrada.")
         return [], set()
     
-    print(f"Encontradas {len(results_to_process)} notícias específicas. Analisando com IA...")
+    print(f"Analisando {len(final_articles_to_analyze)} matérias com IA...")
 
     # 4. Analisa com IA
     pubs_finais = []
     links_encontrados = set()
 
-    for res in results_to_process:
-        # Prompt reforçado com Título e Snippet específico da matéria
-        ai_reason = await get_ai_analysis(
-            clean_text=f"TÍTULO DA MATÉRIA: {res.title}\nRESUMO: {res.snippet}",
-            model=model,
-            prompt_template=GEMINI_VALOR_PROMPT
-        )
+    for item in final_articles_to_analyze:
+        # Filtro prévio simples por keyword para economizar IA
+        text_check = item['title'].lower()
+        keywords_fast = ["orçamento", "fiscal", "defesa", "marinha", "gasto", "corte", "lula", "haddad", "múcio", "economia"]
         
-        links_encontrados.add(res.link)
+        if any(k in text_check for k in keywords_fast):
+            prompt = GEMINI_VALOR_PROMPT.format(titulo=item['title'], resumo="")
+            
+            ai_reason = await get_ai_analysis(
+                clean_text=f"TÍTULO: {item['title']}",
+                model=model,
+                prompt_template=GEMINI_VALOR_PROMPT
+            )
+            
+            links_encontrados.add(item['link'])
 
-        # Filtra respostas negativas da IA
-        if ai_reason and "sem impacto" not in ai_reason.lower():
-            pubs_finais.append({
-                "titulo": res.title,
-                "link": res.link,
-                "analise_ia": ai_reason
-            })
+            if ai_reason and "sem impacto" not in ai_reason.lower():
+                pubs_finais.append({
+                    "titulo": item['title'],
+                    "link": item['link'],
+                    "analise_ia": ai_reason
+                })
 
-    # 5. Retorna os resultados
     return pubs_finais, links_encontrados
 
 
@@ -1112,7 +1161,6 @@ async def processar_dou_ia(
     try:
         listing_url = await resolve_date_url(client, data)
         html = await fetch_listing_html(client, data)
-        # USA A NOVA FUNÇÃO MAIS ROBUSTA DE PARSING DE LINKS
         zip_links = pick_zip_links_from_listing(html, listing_url, secs)
         if not zip_links:
             raise HTTPException(
