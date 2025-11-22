@@ -1,5 +1,5 @@
 fastapi
-uvicorn[standard]
+uvicorn
 httpx
 python-multipart
 beautifulsoup4
@@ -7,3 +7,4 @@ lxml
 google-generativeai
 google-api-python-client
 orcamentobr
+pandas
