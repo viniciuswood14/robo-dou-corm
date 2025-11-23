@@ -1,5 +1,5 @@
 # Nome do arquivo: run_check.py
-# Versão: 14.0.5 (Com monitoramento do PAC)
+# Versão: 16.0.0 (Com Redundância/Fallback Automático)
 
 import asyncio
 import json
@@ -32,58 +32,53 @@ try:
         Publicacao
     )
 except ImportError as e:
-    print(f"Erro: Falha ao importar módulos do 'api.py'. Verifique o arquivo. Detalhe: {e}")
+    print(f"Erro: Falha ao importar módulos do 'api.py'. Detalhe: {e}")
     raise
 
 # Importa o sender do Telegram
 try:
     from telegram import send_telegram_message
 except ImportError as e:
-    print(f"Erro: Falha ao importar 'telegram.py'. Verifique o arquivo. Detalhe: {e}")
+    print(f"Erro: Falha ao importar 'telegram.py'. Detalhe: {e}")
     raise
 
 # Importa a função do robô Valor
 try:
     from check_valor import check_and_process_valor
 except ImportError as e:
-    print(f"Erro: Falha ao importar 'check_valor.py'. Verifique o arquivo. Detalhe: {e}")
+    print(f"Erro: Falha ao importar 'check_valor.py'. Detalhe: {e}")
     raise
 
-# --- [NOVA IMPORTAÇÃO] ---
 # Importa a função do robô PAC
 try:
     from check_pac import check_and_process_pac
 except ImportError as e:
-    print(f"Erro: Falha ao importar 'check_pac.py'. Verifique o arquivo. Detalhe: {e}")
+    print(f"Erro: Falha ao importar 'check_pac.py'. Detalhe: {e}")
     raise
+
+# --- [NOVA IMPORTAÇÃO] ---
+try:
+    from dou_fallback import executar_fallback
+except ImportError:
+    print("Aviso: 'dou_fallback.py' não encontrado. Redundância desativada.")
+    executar_fallback = None
 # --- [FIM DA NOVA IMPORTAÇÃO] ---
 
 
 # --- CONFIGURAÇÃO DO ESTADO (DOU) ---
 STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "/dados/processed_state.json")
 
-# ... (as funções load_state e save_state do DOU continuam iguais) ...
 def load_state() -> Dict[str, List[str]]:
     """Carrega o estado (ZIPs processados) do disco."""
     try:
         state_dir = os.path.dirname(STATE_FILE_PATH)
         if not os.path.exists(state_dir):
             os.makedirs(state_dir, exist_ok=True)
-            print(f"Diretório de estado criado em: {state_dir}")
         
         with open(STATE_FILE_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-            
-    except FileNotFoundError:
-        print(f"Arquivo de estado não encontrado em {STATE_FILE_PATH}. Criando um novo.")
+    except:
         return {} 
-    except (json.JSONDecodeError, IsADirectoryError):
-        print(f"Erro ao ler {STATE_FILE_PATH} (corrompido ou é um diretório). Resetando estado.")
-        return {}
-    except Exception as e:
-        print(f"Erro inesperado ao carregar estado: {e}")
-        return {}
-
 
 def save_state(state: Dict[str, List[str]]):
     """Salva o estado atual no disco."""
@@ -91,70 +86,80 @@ def save_state(state: Dict[str, List[str]]):
         with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2)
     except Exception as e:
-        print(f"Erro Crítico: Falha ao salvar estado em {STATE_FILE_PATH}: {e}")
+        print(f"Erro Crítico ao salvar estado: {e}")
 
 
-# ... (a função check_and_process_dou continua igual) ...
 async def check_and_process_dou(today_str: str):
     """
-    Função principal de verificação do DOU.
-    (Esta função permanece exatamente como a corrigimos anteriormente)
+    Função principal com REDUNDÂNCIA.
+    Tenta InLabs (XML). Se falhar, tenta Site Público (Fallback).
     """
     print(f"--- Iniciando verificação do DOU para a data: {today_str} ---")
     
-    # 0. Configura a IA
+    # 0. Configura IA
     if not GEMINI_API_KEY:
-        print("Erro: GEMINI_API_KEY não encontrada. Abortando.")
+        print("Erro: GEMINI_API_KEY não encontrada.")
         return
     genai.configure(api_key=GEMINI_API_KEY)
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception as e:
-        print(f"Falha ao inicializar o modelo de IA: {e}")
+        print(f"Falha IA: {e}")
         return
 
-    # 1. Carrega o estado
     state = load_state()
     processed_zips_today = set(state.get(today_str, []))
     
+    # Flag para saber se usamos o fallback hoje para não repetir
+    fallback_marker = f"FALLBACK_DONE_{today_str}"
+    if fallback_marker in processed_zips_today:
+        print("Modo Fallback já foi executado com sucesso hoje. Pulando para evitar duplicidade.")
+        return
+
+    pubs_finais: List[Publicacao] = []
+    usou_fallback = False
+    sucesso_inlabs = False
     client = None
+
+    # --- TENTATIVA 1: INLABS ---
     try:
-        # 2. Loga e lista os ZIPs do dia
+        print(">>> Tentando conexão InLabs (Principal)...")
         client = await inlabs_login_and_get_session()
         listing_url = await resolve_date_url(client, today_str)
         html = await fetch_listing_html(client, today_str)
         all_zip_links = pick_zip_links_from_listing(html, listing_url, ["DO1", "DO2", "DO3"])
         
         if not all_zip_links:
-            print(f"Nenhum ZIP do DOU encontrado para {today_str} ainda.")
-            return
+            # Se logou mas não achou ZIP, pode ser que não saiu ainda OU erro no InLabs
+            print(f"Nenhum ZIP encontrado no InLabs para {today_str} ainda.")
+            # Não vamos pro fallback imediatamente se apenas "não saiu", 
+            # mas se der ERRO de conexão, vamos.
+            return 
 
-        # 3. Compara e descobre ZIPs novos
+        # Filtra novos
         current_zip_set = set(all_zip_links)
         new_zip_links = list(current_zip_set - processed_zips_today)
 
         if not new_zip_links:
-            print("Nenhuma nova edição do DOU encontrada.")
+            print("Nenhuma nova edição (ZIP) encontrada.")
             return
 
-        print(f"Sucesso! Encontrados {len(new_zip_links)} novos arquivos ZIP do DOU:")
-        for link in new_zip_links:
-            print(f" - {link.split('/')[-1]}")
-
-        # 4. Processa apenas os ZIPs novos
+        print(f"Encontrados {len(new_zip_links)} novos arquivos ZIP.")
+        
+        # Processa XMLs
         all_new_xml_blobs = []
         for zurl in new_zip_links:
             zb = await download_zip(client, zurl)
             all_new_xml_blobs.extend(extract_xml_from_zip(zb))
-
+        
         if not all_new_xml_blobs:
-            print("Os novos ZIPs do DOU estavam vazios ou não continham XMLs.")
+            print("ZIPs vazios.")
             state[today_str] = list(current_zip_set)
             save_state(state)
             return
-        
-        # 4a. Agrupar XMLs por Matéria
-        materias: Dict[str, Dict[str, Any]] = {}
+
+        # Agrupa e Filtra
+        materias = {}
         for blob in all_new_xml_blobs:
             try:
                 soup = BeautifulSoup(blob, "lxml-xml")
@@ -162,227 +167,191 @@ async def check_and_process_dou(today_str: str):
                 if not article: continue
                 materia_id = article.get("idMateria")
                 if not materia_id: continue
-
                 if materia_id not in materias:
                     materias[materia_id] = {"main_article": None, "full_text": ""}
-                
                 materias[materia_id]["full_text"] += (blob.decode("utf-8", errors="ignore") + "\n")
-                
                 body = article.find("body")
                 if body and body.find("Identifica") and body.find("Identifica").get_text(strip=True):
                     materias[materia_id]["main_article"] = article
-            except Exception:
-                continue
+            except: continue
         
-        # 4b. Estágio 1 (Filtro por Regra Fixa)
-        pubs_filtradas: List[Publicacao] = []
+        pubs_filtradas = []
         for materia_id, content in materias.items():
             if content["main_article"]:
                 publication = process_grouped_materia(
-                    content["main_article"],
-                    content["full_text"],
-                    custom_keywords=[] 
+                    content["main_article"], content["full_text"], custom_keywords=[]
                 )
                 if publication:
                     pubs_filtradas.append(publication)
 
-        # 4c. Deduplicar
-        seen: Set[str] = set()
-        merged_pubs: List[Publicacao] = []
+        # Deduplicar
+        seen = set()
         for p in pubs_filtradas:
             key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
             if key not in seen:
                 seen.add(key)
-                merged_pubs.append(p)
-
-        if not merged_pubs:
-            print("Novos ZIPs (DOU) processados, mas nenhuma matéria relevante encontrada.")
-            state[today_str] = list(current_zip_set)
-            save_state(state)
-            return
-
-        # 4d. Estágio 2 (IA)
-        tasks = []
-        for p in merged_pubs:
-            prompt_to_use = GEMINI_MASTER_PROMPT
-            if p.is_mpo_navy_hit:
-                prompt_to_use = GEMINI_MPO_PROMPT
-            tasks.append(get_ai_analysis(p.clean_text or "", model, prompt_to_use))
-
-        ai_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # 4e. Montar publicações finais (Lógica corrigida)
-        pubs_finais: List[Publicacao] = []
-        for p, ai_out in zip(merged_pubs, ai_results):
-            if isinstance(ai_out, Exception):
-                p.relevance_reason = f"Erro GRAVE na análise de IA: {ai_out}"
                 pubs_finais.append(p)
-                continue
-            if ai_out is None:
-                pubs_finais.append(p)
-                continue
-            if isinstance(ai_out, str):
-                lower_ai = ai_out.lower()
-                if ai_out.startswith("Erro na análise de IA:"):
-                    p.relevance_reason = ai_out
-                    pubs_finais.append(p)
-                    continue
-                if "sem impacto direto" in lower_ai:
-                    if p.is_mpo_navy_hit:
-                        p.relevance_reason = "⚠️ IA ignorou impacto MPO: " + ai_out
-                        pubs_finais.append(p)
-                    elif MPO_ORG_STRING in (p.organ or "").lower():
-                        p.relevance_reason = ai_out
-                        pubs_finais.append(p)
-                    else:
-                        pass
-                    continue
-                p.relevance_reason = ai_out
-                pubs_finais.append(p)
-                continue
-            pubs_finais.append(p)
-
-        if not pubs_finais:
-            print("Matérias (DOU) filtradas pela IA. Nenhuma relevante para notificar.")
-            state[today_str] = list(current_zip_set)
-            save_state(state)
-            return
-
-        # 5. Gera o relatório e envia
-        texto_whatsapp = monta_whatsapp(pubs_finais, today_str)
-        report_header = f"Alerta de novas publicações no DOU de {today_str} (detectadas às {datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%H:%M')}):\n\n"
-        await send_telegram_message(report_header + texto_whatsapp)
-
-        # 6. Atualiza o estado com sucesso
+        
+        sucesso_inlabs = True
+        # Atualiza estado com os ZIPs processados
         state[today_str] = list(current_zip_set)
-        save_state(state)
-        print(f"Estado (DOU) salvo. {len(current_zip_set)} ZIPs processados para {today_str}.")
 
     except Exception as e:
-        print(f"Erro inesperado no fluxo (DOU): {e}")
-        await send_telegram_message(f"Erro no Robô DOU: {e}")
+        print(f"⚠️ Erro no InLabs: {e}")
+        usou_fallback = True
         
     finally:
-        if client:
-            await client.aclose()
-        print(f"--- Verificação do DOU finalizada ---")
+        if client: await client.aclose()
+
+    # --- TENTATIVA 2: FALLBACK (Se InLabs falhou) ---
+    if usou_fallback and executar_fallback:
+        print(">>> Iniciando Modo de Redundância (Fallback)...")
+        try:
+            # Keywords vazias pois o fallback já tem a lista "Hardcoded" da Marinha
+            res_fallback = await executar_fallback(today_str, [])
+            
+            if res_fallback:
+                print(f"Fallback encontrou {len(res_fallback)} itens.")
+                for item in res_fallback:
+                    # Converte dict para objeto Publicacao
+                    p = Publicacao(
+                        organ=item['organ'],
+                        type=item['type'],
+                        summary=item['summary'],
+                        raw=item['raw'],
+                        relevance_reason=item['relevance_reason'],
+                        section=item['section'],
+                        clean_text=item['raw']
+                    )
+                    pubs_finais.append(p)
+                
+                # Marca no estado que o fallback rodou hoje para não repetir em loop
+                current_list = state.get(today_str, [])
+                current_list.append(fallback_marker)
+                state[today_str] = current_list
+            else:
+                print("Fallback rodou mas não encontrou nada relevante.")
+
+        except Exception as ef:
+            print(f"Erro CRÍTICO: Falha também no Fallback: {ef}")
+            return
+
+    # --- ANÁLISE COM IA (Comum aos dois métodos) ---
+    if not pubs_finais:
+        if sucesso_inlabs: 
+            save_state(state)
+        print("Nenhuma publicação relevante encontrada (após filtros).")
+        return
+
+    print(f"Enviando {len(pubs_finais)} matérias para análise da IA...")
+    tasks = []
+    for p in pubs_finais:
+        prompt_to_use = GEMINI_MASTER_PROMPT
+        if p.is_mpo_navy_hit:
+            prompt_to_use = GEMINI_MPO_PROMPT
+        
+        # Se veio do fallback, o texto pode ser menor, mas a IA analisa igual
+        texto_analise = p.clean_text if p.clean_text else p.raw
+        tasks.append(get_ai_analysis(texto_analise, model, prompt_to_use))
+
+    ai_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    pubs_para_envio = []
+    for p, ai_out in zip(pubs_finais, ai_results):
+        if isinstance(ai_out, Exception) or not ai_out:
+            # Se IA falhar, manda assim mesmo para garantir
+            p.relevance_reason = "⚠️ IA indisponível. Verifique manualmente."
+            pubs_para_envio.append(p)
+            continue
+        
+        if "sem impacto direto" in ai_out.lower() and not p.is_mpo_navy_hit:
+            continue # Filtra irrelevantes
+            
+        p.relevance_reason = ai_out
+        pubs_para_envio.append(p)
+
+    if not pubs_para_envio:
+        if sucesso_inlabs: save_state(state)
+        print("IA filtrou tudo. Nada a enviar.")
+        return
+
+    # --- ENVIO TELEGRAM ---
+    texto_zap = monta_whatsapp(pubs_para_envio, today_str)
+    
+    header = f"Alerta de Publicações - DOU ({today_str})\n"
+    if usou_fallback:
+        header += "⚠️ *Aviso: InLabs instável. Busca realizada via portal público.*\n"
+    
+    final_msg = header + "\n" + texto_zap
+    
+    await send_telegram_message(final_msg)
+    
+    # Salva o estado final
+    save_state(state)
+    print("Ciclo finalizado com sucesso.")
 
 
-# --- LOOP PRINCIPAL (MODIFICADO) ---
-
+# --- LOOP PRINCIPAL ---
 async def main_loop():
     """
-    Loop principal que roda como um Background Worker.
-    - Roda check_and_process_dou A CADA 10 MIN (das 5h às 23h)
-    - Roda check_and_process_valor UMA VEZ POR DIA (às 5h10, de Seg a Sex)
-    - Roda check_and_process_pac UMA VEZ POR DIA (às 5h15, de Seg a Sex)
+    Loop de serviço contínuo.
     """
-    
     TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
     INTERVALO_SEGUNDOS = 10 * 60 # 10 minutos
     
-    # --- [FLAGS DE CONTROLE MODIFICADAS] ---
-    valor_check_done_today = False
-    pac_check_done_today = False # <-- NOVA FLAG
-    last_check_day = None
-    # --- [FIM DA MODIFICAÇÃO] ---
+    valor_check_done = False
+    pac_check_done = False
+    last_day = None
     
-    print("--- Iniciando Robô (DOU + Valor + PAC) v14.0.5 em modo Background Worker ---")
+    print("--- Robô Integrado (DOU + Fallback + Valor + PAC) Iniciado ---")
 
     while True:
-        # Pega a hora atual de Brasília no INÍCIO do ciclo
-        agora_brasilia = datetime.now(TZ_BRASILIA)
-        hora_atual = agora_brasilia.hour 
-        minuto_atual = agora_brasilia.minute
+        agora = datetime.now(TZ_BRASILIA)
+        hoje_str = agora.strftime('%Y-%m-%d')
+        ano_str = agora.strftime('%Y')
+        ontem_str = (agora - timedelta(days=1)).strftime('%Y-%m-%d')
         
-        # --- [VARIÁVEIS DE DATA ATUALIZADAS] ---
-        data_hoje_brasilia = agora_brasilia.strftime('%Y-%m-%d')
-        ano_hoje_brasilia = agora_brasilia.strftime('%Y') # <-- NOVO
-        data_ontem_brasilia = (agora_brasilia - timedelta(days=1)).strftime('%Y-%m-%d')
-        # --- [FIM DA MODIFICAÇÃO] ---
+        # Reseta flags diárias
+        if last_day != hoje_str:
+            valor_check_done = False
+            pac_check_done = False
+            last_day = hoje_str
+            print(f"*** Novo dia: {hoje_str} ***")
 
-
-        # Se o dia mudou, reseta os controles diários
-        if last_check_day != data_hoje_brasilia:
-            valor_check_done_today = False
-            pac_check_done_today = False # <-- RESET DA NOVA FLAG
-            last_check_day = data_hoje_brasilia
-            print(f"*** Novo dia detectado ({data_hoje_brasilia}). Resetando flags diárias. ***")
-        
-        # Define o período de atividade
-        hora_inicio = 5
-        hora_fim = 24 # TEMPORÁRIO PARA TESTAR (Voltar para 23)
-        
-        if hora_inicio <= hora_atual < hora_fim:
+        # [cite_start]Horário de expediente (05h às 23h) [cite: 1]
+        if 5 <= agora.hour < 23:
             
-            # --- 1. Verificação do DOU (Roda a cada 10 min) ---
-            print(f"[{agora_brasilia.strftime('%H:%M')}] Em expediente. Checando DOU (data: {data_hoje_brasilia})...")
+            # 1. DOU (Roda a cada 10 min)
             try:
-                await check_and_process_dou(data_hoje_brasilia)
+                await check_and_process_dou(hoje_str)
             except Exception as e:
-                print(f"Erro CRÍTICO no loop (check_and_process_dou): {e}")
-                try:
-                    await send_telegram_message(f"Erro CRÍTICO no Robô DOU: {e}\nVou tentar rodar de novo em 10 min.")
-                except:
-                    pass
-            
-            
-            # Checagem de dia de semana (weekday < 5)
-            is_weekday = agora_brasilia.weekday() < 5
-                               
-           # [Original - run_check.py]
+                print(f"Erro no loop DOU: {e}")
 
-            # --- 2. Verificação do VALOR (Roda 1x por dia, após 5h10, em dias de semana) ---
-            if (hora_atual == 5 and minuto_atual >= 10) and not valor_check_done_today and is_weekday:
-                
-                print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do Valor (5h10+, Dia de Semana). Iniciando checagem do dia anterior ({data_ontem_brasilia})... ***")
+            is_weekday = agora.weekday() < 5
+
+            # 2. Valor (05:10+, dias úteis)
+            if is_weekday and agora.hour == 5 and agora.minute >= 10 and not valor_check_done:
                 try:
-                    await check_and_process_valor(data_ontem_brasilia)
-                    
-                    valor_check_done_today = True # Marca como feito para hoje
-                    print(f"*** Checagem do Valor concluída para {data_ontem_brasilia}. ***")
-                
+                    await check_and_process_valor(ontem_str)
+                    valor_check_done = True
                 except Exception as e:
-                    print(f"Erro CRÍTICO no loop (check_and_process_valor): {e}")
-                    await send_telegram_message(f"Erro CRÍTICO no Robô Valor: {e}")
-            
-            elif (hora_atual == 5 and minuto_atual >= 10) and not is_weekday:
-                if not valor_check_done_today:
-                    print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do Valor, mas é fim de semana. Pulando checagem do Valor.")
-                    valor_check_done_today = True 
-            
-            # --- [NOVO BLOCO - VERIFICAÇÃO DO PAC] ---
-            # Roda 1x por dia, após 5h15 (depois do Valor), em dias de semana
-            if (hora_atual == 5 and minuto_atual >= 15) and not pac_check_done_today and is_weekday:
-                
-                print(f"[{agora_brasilia.strftime('%H:%M')}] *** Horário do PAC (5h15+, Dia de Semana). Iniciando checagem de dotações ({ano_hoje_brasilia})... ***")
+                    print(f"Erro Valor: {e}")
+
+            # 3. PAC (05:15+, dias úteis)
+            if is_weekday and agora.hour == 5 and agora.minute >= 15 and not pac_check_done:
                 try:
-                    # Usa o ANO ATUAL para a busca
-                    await check_and_process_pac(ano_hoje_brasilia)
-                    
-                    pac_check_done_today = True # Marca como feito para hoje
-                    print(f"*** Checagem do PAC concluída para {ano_hoje_brasilia}. ***")
-                
+                    await check_and_process_pac(ano_str)
+                    pac_check_done = True
                 except Exception as e:
-                    print(f"Erro CRÍTICO no loop (check_and_process_pac): {e}")
-                    await send_telegram_message(f"Erro CRÍTICO no Robô PAC: {e}")
-            
-            elif (hora_atual == 5 and minuto_atual >= 15) and not is_weekday:
-                 if not pac_check_done_today:
-                    print(f"[{agora_brasilia.strftime('%H:%M')}] Horário do PAC, mas é fim de semana. Pulando checagem do PAC.")
-                    pac_check_done_today = True
-            # --- [FIM DO NOVO BLOCO] ---
-            
+                    print(f"Erro PAC: {e}")
+
         else:
-            print(f"[{agora_brasilia.strftime('%H:%M:%S')}] Fora de expediente (Hora: {hora_atual}h). Pulando esta verificação.")
+            print(f"[{agora.strftime('%H:%M')}] Fora de expediente. Dormindo.")
 
-        
-        print(f"--- Próxima checagem em 10 minutos... ---")
         await asyncio.sleep(INTERVALO_SEGUNDOS)
-
 
 if __name__ == "__main__":
     try:
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        print("\n--- Robô interrompido manualmente ---")
+        print("Robô parado.")
