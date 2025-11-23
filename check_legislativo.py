@@ -43,6 +43,7 @@ KEYWORDS = [
     "fundo de desenvolvimento do ensino profissional marítimo",
     "programa nuclear da marinha",
     "Defesa Marítima",
+    "fragata",
     "amazônia azul",
     "Pensões Militares"
 ]
