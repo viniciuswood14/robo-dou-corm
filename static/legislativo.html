@@ -14,8 +14,8 @@
       background-color: #f8f9fa;
       border-radius: 4px;
     }
-    .leg-camara { border-left-color: #28a745; } /* Verde */
-    .leg-senado { border-left-color: #0056b3; } /* Azul */
+    .leg-camara { border-left-color: #28a745; }
+    .leg-senado { border-left-color: #0056b3; }
     .leg-badge {
         font-size: 0.8em;
         padding: 2px 6px;
@@ -26,6 +26,23 @@
     }
     .bg-camara { background-color: #28a745; }
     .bg-senado { background-color: #0056b3; }
+    
+    /* Estilo do Select */
+    .filter-container {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        align-items: center;
+        justify-content: center;
+    }
+    select {
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        background-color: white;
+        font-size: 16px;
+        max-width: 200px;
+    }
   </style>
 </head>
 <body>
@@ -37,8 +54,17 @@
     </header>
 
     <p class="hint">
-        O robô consulta as APIs de Dados Abertos da <b>Câmara dos Deputados</b> e do <b>Senado Federal</b> procurando por PLs, PECs e Requerimentos com palavras-chave estratégicas (PROSUB, Nuclear, Orçamento, etc) apresentados nos últimos dias.
+        O robô consulta as APIs de Dados Abertos da Câmara e do Senado procurando por PLs, PECs e Requerimentos com palavras-chave estratégicas (PROSUB, Nuclear, Orçamento, etc).
     </p>
+
+    <div class="filter-container">
+        <label for="daysSelect">Período:</label>
+        <select id="daysSelect">
+            <option value="5" selected>Últimos 5 dias</option>
+            <option value="15">Últimos 15 dias</option>
+            <option value="30">Últimos 30 dias</option>
+        </select>
+    </div>
 
     <div class="actions" style="justify-content: center;">
       <button id="btnLegislativo" style="background-color: #4a4e69; border-color: #4a4e69; width: 100%;">
@@ -48,27 +74,42 @@
     </div>
 
     <div id="leg-results" style="margin-top: 20px;">
-        <p id="leg-status" class="hint" style="text-align: center;">Clique no botão para iniciar a varredura.</p>
+        <p id="leg-status" class="hint" style="text-align: center;">Selecione o período e clique para iniciar.</p>
     </div>
 
   </main>
 
-  <script src="app.js"></script>
   <script>
-    // Script específico inline ou pode adicionar ao app.js
-    document.getElementById("btnLegislativo").addEventListener("click", async () => {
+      // Garante que a API_BASE está vazia para usar o mesmo domínio
+      const API_BASE = ""; 
+
+      document.getElementById("btnLegislativo").addEventListener("click", async () => {
         const btn = document.getElementById("btnLegislativo");
+        const select = document.getElementById("daysSelect");
         const container = document.getElementById("leg-results");
         const status = document.getElementById("leg-status");
         
+        const days = select.value; // Pega o valor selecionado (5, 15 ou 30)
+
         btn.disabled = true;
-        btn.innerHTML = "Consultando APIs Oficiais...";
-        status.textContent = "Aguarde, conectando ao Congresso Nacional...";
+        btn.innerHTML = `Consultando últimos ${days} dias...`;
+        
+        // Limpa resultados anteriores
         container.innerHTML = "";
+        status.style.display = "block";
+        status.textContent = `Aguarde... varrendo Câmara e Senado (${days} dias)...`;
         container.appendChild(status);
 
         try {
-            const res = await fetch("/processar-legislativo", { method: "POST" });
+            // Monta o Form Data com o parametro 'days'
+            const formData = new FormData();
+            formData.append('days', days);
+
+            const res = await fetch(API_BASE + "/processar-legislativo", { 
+                method: "POST",
+                body: formData
+            });
+            
             const json = await res.json();
 
             if (!res.ok) throw new Error(json.detail || "Erro na API");
@@ -84,6 +125,8 @@
                     const cssClass = p.casa === "Câmara" ? "leg-camara" : "leg-senado";
                     const badgeClass = p.casa === "Câmara" ? "bg-camara" : "bg-senado";
                     
+                    // Formata a data se disponível (extrai os 4 primeiros chars do ano ou usa regex se quiser sofisticar)
+                    
                     html += `
                     <div class="leg-card ${cssClass}">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -93,7 +136,7 @@
                         <div style="font-weight: bold; color: #333; margin-bottom: 5px;">
                             🔎 Tema: ${p.keyword}
                         </div>
-                        <p style="font-size: 14px; margin-bottom: 10px;">
+                        <p style="font-size: 14px; margin-bottom: 10px; color: #212529;">
                             ${p.ementa}
                         </p>
                         <a href="${p.link}" target="_blank" style="font-size: 13px; text-decoration: underline; color: var(--navy-blue);">
