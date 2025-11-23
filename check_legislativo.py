@@ -196,4 +196,3 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
     
     await send_telegram_message(final_text)
     return telegram_list
-```json
