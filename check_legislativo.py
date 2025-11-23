@@ -45,6 +45,7 @@ KEYWORDS = [
     "programa nuclear da marinha",
     "Defesa Marítima",
     "fragata",
+    "Brasil",
     "Pensões Militares"
 ]
 
