@@ -37,6 +37,11 @@ try:
 except ImportError:
     pass
 
+# --- [fallback] ---
+try:
+    from dou_fallback import executar_fallback
+except ImportError:
+    executar_fallback = None
 # =====================================================================================
 # Robô DOU/Valor API
 # =====================================================================================
@@ -860,7 +865,7 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
     return xml_blobs
 
 # =====================================================================================
-# /processar-inlabs (SEM IA) - Endpoint Rápido
+# /processar-inlabs (COM REDUNDÂNCIA)
 # =====================================================================================
 @app.post("/processar-inlabs", response_model=ProcessResponse)
 async def processar_inlabs(
@@ -888,80 +893,108 @@ async def processar_inlabs(
                 ]
         except json.JSONDecodeError:
             pass
-    client = await inlabs_login_and_get_session()
-    try:
-        listing_url = await resolve_date_url(client, data)
-        html = await fetch_listing_html(client, data)
-        zip_links = pick_zip_links_from_listing(html, listing_url, secs)
-        if not zip_links:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Não encontrei ZIPs para a seção '{', '.join(secs)}'.",
-            )
-        all_xml_blobs = []
-        for zurl in zip_links:
-            zb = await download_zip(client, zurl)
-            all_xml_blobs.extend(extract_xml_from_zip(zb))
-        materias: Dict[str, Dict[str, Any]] = {}
-        for blob in all_xml_blobs:
-            try:
-                soup = BeautifulSoup(blob, "lxml-xml")
-                article = soup.find("article")
-                if not article:
-                    continue
-                materia_id = article.get("idMateria")
-                if not materia_id:
-                    continue
-                if materia_id not in materias:
-                    materias[materia_id] = {
-                        "main_article": None,
-                        "full_text": "",
-                    }
-                materias[materia_id]["full_text"] += (
-                    blob.decode("utf-8", errors="ignore") + "\n"
-                )
-                body = article.find("body")
-                if (
-                    body
-                    and body.find("Identifica")
-                    and body.find("Identifica").get_text(strip=True)
-                ):
-                    materias[materia_id]["main_article"] = article
-            except Exception:
-                continue
-        pubs: List[Publicacao] = []
-        for materia_id, content in materias.items():
-            if content["main_article"]:
-                publication = process_grouped_materia(
-                    content["main_article"],
-                    content["full_text"],
-                    custom_keywords,
-                )
-                if publication:
-                    pubs.append(publication)
-        seen: Set[str] = set()
-        merged: List[Publicacao] = []
-        for p in pubs:
-            key = (
-                (p.organ or "")
-                + "||"
-                + (p.type or "")
-                + "||"
-                + (p.summary or "")[:100]
-            )
-            if key not in seen:
-                seen.add(key)
-                merged.append(p)
-        texto = monta_whatsapp(merged, data)
-        return ProcessResponse(
-            date=data,
-            count=len(merged),
-            publications=merged,
-            whatsapp_text=texto,
-        )
-    finally:
-        await client.aclose()
 
+    pubs_final: List[Publicacao] = []
+    usou_fallback = False
+    erro_principal = ""
+
+    # --- TENTATIVA 1: INLABS (XML/ZIP) ---
+    print(f">>> Tentando InLabs (Principal) para {data}...")
+    try:
+        client = await inlabs_login_and_get_session()
+        try:
+            listing_url = await resolve_date_url(client, data)
+            html = await fetch_listing_html(client, data)
+            zip_links = pick_zip_links_from_listing(html, listing_url, secs)
+            
+            if not zip_links:
+                raise HTTPException(status_code=404, detail="ZIPs não encontrados.")
+
+            all_xml_blobs = []
+            for zurl in zip_links:
+                zb = await download_zip(client, zurl)
+                all_xml_blobs.extend(extract_xml_from_zip(zb))
+            
+            # ... (Lógica de parse do XML igual ao original) ...
+            materias: Dict[str, Dict[str, Any]] = {}
+            for blob in all_xml_blobs:
+                try:
+                    soup = BeautifulSoup(blob, "lxml-xml")
+                    article = soup.find("article")
+                    if not article: continue
+                    materia_id = article.get("idMateria")
+                    if not materia_id: continue
+                    if materia_id not in materias:
+                        materias[materia_id] = {"main_article": None, "full_text": ""}
+                    materias[materia_id]["full_text"] += (blob.decode("utf-8", errors="ignore") + "\n")
+                    body = article.find("body")
+                    if body and body.find("Identifica") and body.find("Identifica").get_text(strip=True):
+                        materias[materia_id]["main_article"] = article
+                except: continue
+            
+            for materia_id, content in materias.items():
+                if content["main_article"]:
+                    publication = process_grouped_materia(
+                        content["main_article"], content["full_text"], custom_keywords
+                    )
+                    if publication:
+                        pubs_final.append(publication)
+            
+            # Se chegou aqui e achou zero, pode ser erro de publicação do InLabs (ZIP vazio)
+            # Mas se o ZIP existia e baixou, consideramos sucesso técnico.
+            
+        finally:
+            await client.aclose()
+
+    except Exception as e:
+        print(f"⚠️ Falha no InLabs: {e}")
+        erro_principal = str(e)
+        usou_fallback = True
+
+    # --- TENTATIVA 2: FALLBACK (DOU PÚBLICO) ---
+    # Aciona se houve erro no InLabs OU se InLabs retornou vazio (opcional, aqui aciona só no erro)
+    if usou_fallback and executar_fallback:
+        print(f">>> Acionando Fallback (in.gov.br) para {data}...")
+        try:
+            fb_results = await executar_fallback(data, custom_keywords)
+            
+            # Converte dicts do fallback para objetos Publicacao
+            for item in fb_results:
+                pubs_final.append(Publicacao(
+                    organ=item['organ'],
+                    type=item['type'],
+                    summary=item['summary'],
+                    raw=item['raw'],
+                    relevance_reason=item['relevance_reason'] + " (Modo Redundância)",
+                    section=item['section'],
+                    clean_text=item['raw']
+                ))
+        except Exception as e_fb:
+            print(f"Erro no Fallback: {e_fb}")
+            if not pubs_final:
+                raise HTTPException(status_code=500, detail=f"Erro InLabs ({erro_principal}) E Erro Fallback ({e_fb})")
+
+    # --- Deduplicação e Retorno ---
+    seen: Set[str] = set()
+    merged: List[Publicacao] = []
+    for p in pubs_final:
+        key = (p.organ or "") + "||" + (p.type or "") + "||" + (p.summary or "")[:100]
+        if key not in seen:
+            seen.add(key)
+            merged.append(p)
+
+    texto = monta_whatsapp(merged, data)
+    
+    # Adiciona aviso se usou fallback
+    if usou_fallback:
+        texto = "⚠️ *Aviso: Sistema InLabs indisponível. Dados obtidos via busca no DOU Público.*\n\n" + texto
+
+    return ProcessResponse(
+        date=data,
+        count=len(merged),
+        publications=merged,
+        whatsapp_text=texto,
+    )
 
 # =====================================================================================
 # IA helper
