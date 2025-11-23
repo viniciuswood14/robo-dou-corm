@@ -117,6 +117,9 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
 # Substitua a função 'check_senado' no arquivo check_legislativo.py por esta versão:
 
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
+   # Substitua a função 'check_senado' no arquivo check_legislativo.py por esta versão:
+
+async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
     print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
@@ -190,7 +193,6 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
             print(f"Erro API Senado ({kw}): {e}")
 
     return results
-
 # --- FUNÇÃO PRINCIPAL (WORKER + API) ---
 async def check_and_process_legislativo(only_new: bool = True, days_back: int = 5) -> List[Dict]:
     """
