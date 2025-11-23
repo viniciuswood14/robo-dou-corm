@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Legislativo - CORM</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="favicon.ico" type="image/x-icon">
+  <style>
+    .leg-card {
+      border-left: 4px solid #ccc;
+      padding: 10px 15px;
+      margin-bottom: 15px;
+      background-color: #f8f9fa;
+      border-radius: 4px;
+    }
+    .leg-camara { border-left-color: #28a745; } /* Verde */
+    .leg-senado { border-left-color: #0056b3; } /* Azul */
+    .leg-badge {
+        font-size: 0.8em;
+        padding: 2px 6px;
+        border-radius: 4px;
+        color: white;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+    .bg-camara { background-color: #28a745; }
+    .bg-senado { background-color: #0056b3; }
+  </style>
+</head>
+<body>
+  <a href="index.html" class="back-link">← Voltar para a Página Inicial</a>
+  <main class="card">
+    <header class="card-header">
+      <img src="logo-marinha.png" alt="Logotipo da Marinha do Brasil" class="logo" />
+      <h1>Monitoramento Legislativo</h1>
+    </header>
+
+    <p class="hint">
+        O robô consulta as APIs de Dados Abertos da <b>Câmara dos Deputados</b> e do <b>Senado Federal</b> procurando por PLs, PECs e Requerimentos com palavras-chave estratégicas (PROSUB, Nuclear, Orçamento, etc) apresentados nos últimos dias.
+    </p>
+
+    <div class="actions" style="justify-content: center;">
+      <button id="btnLegislativo" style="background-color: #4a4e69; border-color: #4a4e69; width: 100%;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4 8 4v14"/><path d="M8 21v-9a4 4 0 1 1 8 0v9"/></svg>
+        Verificar Câmara e Senado Agora
+      </button>
+    </div>
+
+    <div id="leg-results" style="margin-top: 20px;">
+        <p id="leg-status" class="hint" style="text-align: center;">Clique no botão para iniciar a varredura.</p>
+    </div>
+
+  </main>
+
+  <script src="app.js"></script>
+  <script>
+    // Script específico inline ou pode adicionar ao app.js
+    document.getElementById("btnLegislativo").addEventListener("click", async () => {
+        const btn = document.getElementById("btnLegislativo");
+        const container = document.getElementById("leg-results");
+        const status = document.getElementById("leg-status");
+        
+        btn.disabled = true;
+        btn.innerHTML = "Consultando APIs Oficiais...";
+        status.textContent = "Aguarde, conectando ao Congresso Nacional...";
+        container.innerHTML = "";
+        container.appendChild(status);
+
+        try {
+            const res = await fetch("/processar-legislativo", { method: "POST" });
+            const json = await res.json();
+
+            if (!res.ok) throw new Error(json.detail || "Erro na API");
+
+            status.style.display = "none";
+            
+            if (json.count === 0) {
+                container.innerHTML = `<div class="preview" style="text-align: center;">✅ ${json.message}</div>`;
+            } else {
+                let html = `<div class="preview" style="background: #e8f5e9; color: #1b5e20; margin-bottom: 15px;">✅ ${json.message}</div>`;
+                
+                json.data.forEach(p => {
+                    const cssClass = p.casa === "Câmara" ? "leg-camara" : "leg-senado";
+                    const badgeClass = p.casa === "Câmara" ? "bg-camara" : "bg-senado";
+                    
+                    html += `
+                    <div class="leg-card ${cssClass}">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span class="leg-badge ${badgeClass}">${p.casa}</span>
+                            <small style="color: #666;">${p.tipo} ${p.numero}/${p.ano}</small>
+                        </div>
+                        <div style="font-weight: bold; color: #333; margin-bottom: 5px;">
+                            🔎 Tema: ${p.keyword}
+                        </div>
+                        <p style="font-size: 14px; margin-bottom: 10px;">
+                            ${p.ementa}
+                        </p>
+                        <a href="${p.link}" target="_blank" style="font-size: 13px; text-decoration: underline; color: var(--navy-blue);">
+                            🔗 Ver Inteiro Teor na Fonte Oficial
+                        </a>
+                    </div>
+                    `;
+                });
+                container.innerHTML = html;
+            }
+
+        } catch (err) {
+            container.innerHTML = `<div class="preview" style="color: red;">❌ Erro: ${err.message}</div>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4 8 4v14"/><path d="M8 21v-9a4 4 0 1 1 8 0v9"/></svg>
+            Verificar Câmara e Senado Agora`;
+        }
+    });
+  </script>
+</body>
+</html>
