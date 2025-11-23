@@ -1,6 +1,6 @@
 # Nome do arquivo: check_legislativo.py
 # Módulo para monitorar Projetos de Lei via APIs Oficiais (Câmara e Senado)
-# Versão: 2.1 (Correção de Sintaxe e Filtros)
+# Versão: 3.0 (Correção de Indentação e Filtro de Ano Senado)
 
 import os
 import json
@@ -45,8 +45,10 @@ KEYWORDS = [
     "programa nuclear da marinha",
     "Defesa Marítima",
     "fragata",
-    "Brasil",
-    "Pensões Militares"
+    "Pensões Militares",
+    "Soberania Nacional",
+    "Almirantado",
+    "Corpo de Fuzileiros Navais"
 ]
 
 # URLs Oficiais das APIs
@@ -92,7 +94,7 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
         try:
             # A API da Câmara é chata com headers, user-agent ajuda
             headers = {"User-Agent": "RoboLegislativoMB/1.0"}
-            resp = await client.get(URL_CAMARA, params=params, headers=headers)
+            resp = await client.get(URL_CAMARA, params=params, headers=headers, timeout=15)
             
             if resp.status_code == 200:
                 dados = resp.json().get("dados", [])
@@ -114,34 +116,23 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
             
     return results
 
-# Substitua a função 'check_senado' no arquivo check_legislativo.py por esta versão:
-
-async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
-   # Substitua a função 'check_senado' no arquivo check_legislativo.py por esta versão:
-
+# --- CONSULTA SENADO (CORRIGIDA) ---
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
     print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
-    # Define a data limite (ex: 30 dias atrás)
     limit_date = datetime.now() - timedelta(days=days_back_int)
     
-    # Pega o ano atual para forçar a API a trazer coisas novas
+    # Pega o ano atual para forçar a API a trazer coisas novas e não históricas
     ano_atual = datetime.now().year 
 
     for kw in KEYWORDS:
-        # [CORREÇÃO CRÍTICA]
-        # Adicionamos 'ano' nos parâmetros. Sem isso, o Senado manda coisas de 2010 
-        # e o seu código filtrava tudo, resultando em lista vazia.
-        params = {
-            "palavraChave": kw,
-            "ano": ano_atual
-        }
+        # [IMPORTANTE] Filtro de ano na URL para evitar lixo histórico
+        url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}"
         
         try:
-            # Timeout maior (15s) pois o Senado às vezes oscila
-            resp = await client.get(URL_SENADO, params=params, headers=headers, timeout=15)
+            resp = await client.get(url, headers=headers, timeout=15)
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -155,23 +146,22 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                 
                 lista_materias = materias_container.get("Materia", [])
                 if isinstance(lista_materias, dict): 
-                    lista_materias = [lista_materias] # Normaliza se for item único
+                    lista_materias = [lista_materias] # Normaliza se for 1 item
                 
-                # DEBUG: Ver quantas matérias o Senado retornou (mesmo que antigas)
-                # Isso vai aparecer no log do Render
-                if len(lista_materias) > 0:
-                    print(f"   [DEBUG Senado] '{kw}': retornou {len(lista_materias)} itens brutos.")
+                # DEBUG: Remove comentário se quiser ver no log
+                # if len(lista_materias) > 0:
+                #    print(f"[DEBUG Senado] '{kw}' encontrou {len(lista_materias)} itens brutos.")
 
                 for mat in lista_materias:
                     dados = mat.get("DadosBasicosMateria", {})
-                    data_apres = dados.get("DataApresentacao") # YYYY-MM-DD
+                    data_apres = dados.get("DataApresentacao") # Pode vir como string YYYY-MM-DD
                     
                     if data_apres:
                         try:
-                            # Converte string para data
+                            # Pega apenas a data (primeiros 10 chars) e converte
                             dt_obj = datetime.strptime(str(data_apres)[:10], "%Y-%m-%d")
                             
-                            # Filtra: Se for mais recente que a data limite, adiciona na lista
+                            # Filtra: Se for mais recente que a data limite
                             if dt_obj >= limit_date:
                                 results.append({
                                     "uid": f"SEN_{dados.get('CodigoMateria')}",
@@ -186,13 +176,13 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                         except ValueError:
                             continue
             
-            # Pausa leve para não bloquear o IP
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2) # Pausa leve
             
         except Exception as e:
             print(f"Erro API Senado ({kw}): {e}")
 
     return results
+
 # --- FUNÇÃO PRINCIPAL (WORKER + API) ---
 async def check_and_process_legislativo(only_new: bool = True, days_back: int = 5) -> List[Dict]:
     """
@@ -205,13 +195,14 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
     
     processed_ids = load_state()
     
-    # Define janela de tempo
+    # Define janela de tempo para a Câmara
     start_date_iso = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     
     propostas_encontradas = [] # Lista final de retorno
     novas_para_telegram = []   # Lista apenas para notificação
     
     async with httpx.AsyncClient(timeout=40) as client:
+        # Busca nas duas casas
         res_camara = await check_camara(client, start_date_iso)
         res_senado = await check_senado(client, days_back)
         
@@ -244,7 +235,8 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
         
         for p in novas_para_telegram:
             icon = "🟢" if p['casa'] == "Câmara" else "🔵"
-            ementa_curta = p['ementa'][:250] + "..." if p['ementa'] and len(p['ementa']) > 250 else p['ementa']
+            ementa_limpa = p['ementa'] or "Sem ementa."
+            ementa_curta = ementa_limpa[:250] + "..." if len(ementa_limpa) > 250 else ementa_limpa
             
             msg.append(f"{icon} *{p['casa']}* | {p['tipo']} {p['numero']}/{p['ano']}")
             msg.append(f"🔎 _Tema: {p['keyword']}_")
@@ -265,7 +257,7 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
         
         return novas_para_telegram
 
-    # Se for chamada do Site (only_new=False), apenas retorna a lista completa da janela de tempo
-    # Nota: Também salvamos o estado aqui para evitar que o robô notifique depois algo que o usuário já viu no site.
+    # Se for chamada do Site (only_new=False), apenas retorna a lista completa
+    # Também salvamos o estado para evitar repetição no Telegram
     save_state(processed_ids)
     return propostas_encontradas
