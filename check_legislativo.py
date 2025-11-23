@@ -114,31 +114,36 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
             
     return results
 
-# --- CONSULTA SENADO ---
-# No arquivo check_legislativo.py
-
-# No arquivo check_legislativo.py (Substitua a função check_senado inteira)
+# Substitua a função 'check_senado' no arquivo check_legislativo.py por esta versão:
 
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
     print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
+    # Define a data limite (ex: 30 dias atrás)
     limit_date = datetime.now() - timedelta(days=days_back_int)
-    # Pega o ano atual para a busca
+    
+    # Pega o ano atual para forçar a API a trazer coisas novas
     ano_atual = datetime.now().year 
 
     for kw in KEYWORDS:
-        # Busca por palavra-chave E ano atual para otimizar
-        url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}"
+        # [CORREÇÃO CRÍTICA]
+        # Adicionamos 'ano' nos parâmetros. Sem isso, o Senado manda coisas de 2010 
+        # e o seu código filtrava tudo, resultando em lista vazia.
+        params = {
+            "palavraChave": kw,
+            "ano": ano_atual
+        }
         
         try:
-            resp = await client.get(url, headers=headers, timeout=10)
+            # Timeout maior (15s) pois o Senado às vezes oscila
+            resp = await client.get(URL_SENADO, params=params, headers=headers, timeout=15)
             
             if resp.status_code == 200:
                 data = resp.json()
                 
-                # Navegação segura no JSON do Senado
+                # Navegação segura no JSON complexo do Senado
                 pesquisa = data.get("PesquisaBasicaMateria", {})
                 if not pesquisa: continue
                 
@@ -147,18 +152,23 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                 
                 lista_materias = materias_container.get("Materia", [])
                 if isinstance(lista_materias, dict): 
-                    lista_materias = [lista_materias] 
+                    lista_materias = [lista_materias] # Normaliza se for item único
                 
+                # DEBUG: Ver quantas matérias o Senado retornou (mesmo que antigas)
+                # Isso vai aparecer no log do Render
+                if len(lista_materias) > 0:
+                    print(f"   [DEBUG Senado] '{kw}': retornou {len(lista_materias)} itens brutos.")
+
                 for mat in lista_materias:
                     dados = mat.get("DadosBasicosMateria", {})
-                    data_apres = dados.get("DataApresentacao") # Pode ser None
+                    data_apres = dados.get("DataApresentacao") # YYYY-MM-DD
                     
                     if data_apres:
                         try:
-                            # Tenta converter a data (yyyy-mm-dd)
+                            # Converte string para data
                             dt_obj = datetime.strptime(str(data_apres)[:10], "%Y-%m-%d")
                             
-                            # Verifica se está dentro da janela de dias escolhida
+                            # Filtra: Se for mais recente que a data limite, adiciona na lista
                             if dt_obj >= limit_date:
                                 results.append({
                                     "uid": f"SEN_{dados.get('CodigoMateria')}",
@@ -171,13 +181,12 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                                     "keyword": kw
                                 })
                         except ValueError:
-                            print(f"Erro de data no Senado: {data_apres}")
                             continue
             
-            await asyncio.sleep(0.2) # Respeita limite da API
+            # Pausa leve para não bloquear o IP
+            await asyncio.sleep(0.2)
             
         except Exception as e:
-            # Imprime o erro no log do Render para sabermos o que houve
             print(f"Erro API Senado ({kw}): {e}")
 
     return results
