@@ -117,24 +117,28 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
 # --- CONSULTA SENADO ---
 # No arquivo check_legislativo.py
 
+# No arquivo check_legislativo.py (Substitua a função check_senado inteira)
+
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
     print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
     limit_date = datetime.now() - timedelta(days=days_back_int)
-    ano_atual = datetime.now().year # Pega 2025 automaticamente
+    # Pega o ano atual para a busca
+    ano_atual = datetime.now().year 
 
     for kw in KEYWORDS:
-        # --- CORREÇÃO AQUI: Adicionamos o filtro de ANO na URL ---
-        # Isso força a API a trazer coisas novas, senão ela traz coisas de 2010 que o Python ignora.
+        # Busca por palavra-chave E ano atual para otimizar
         url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}"
         
         try:
-            resp = await client.get(url, headers=headers)
+            resp = await client.get(url, headers=headers, timeout=10)
+            
             if resp.status_code == 200:
                 data = resp.json()
                 
+                # Navegação segura no JSON do Senado
                 pesquisa = data.get("PesquisaBasicaMateria", {})
                 if not pesquisa: continue
                 
@@ -147,13 +151,14 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                 
                 for mat in lista_materias:
                     dados = mat.get("DadosBasicosMateria", {})
-                    data_apres = dados.get("DataApresentacao", "")[:10] 
+                    data_apres = dados.get("DataApresentacao") # Pode ser None
                     
                     if data_apres:
                         try:
-                            dt_obj = datetime.strptime(data_apres, "%Y-%m-%d")
+                            # Tenta converter a data (yyyy-mm-dd)
+                            dt_obj = datetime.strptime(str(data_apres)[:10], "%Y-%m-%d")
                             
-                            # Verifica a janela de tempo (days_back)
+                            # Verifica se está dentro da janela de dias escolhida
                             if dt_obj >= limit_date:
                                 results.append({
                                     "uid": f"SEN_{dados.get('CodigoMateria')}",
@@ -165,9 +170,14 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                                     "link": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{dados.get('CodigoMateria')}",
                                     "keyword": kw
                                 })
-                        except: pass
-            await asyncio.sleep(0.2)
+                        except ValueError:
+                            print(f"Erro de data no Senado: {data_apres}")
+                            continue
+            
+            await asyncio.sleep(0.2) # Respeita limite da API
+            
         except Exception as e:
+            # Imprime o erro no log do Render para sabermos o que houve
             print(f"Erro API Senado ({kw}): {e}")
 
     return results
