@@ -1504,32 +1504,44 @@ async def force_update_pac():
     await update_pac_historical_cache()
     return {"status": "Cache histórico atualizado com sucesso! Recarregue o dashboard."}
 
-# =====================================================================================
+# ... (outros imports)
+
 # [NOVO] MONITORAMENTO LEGISLATIVO
 # =====================================================================================
 
 @app.post("/processar-legislativo")
-async def endpoint_legislativo():
+async def endpoint_legislativo(days: int = Form(5)): # <--- ADICIONADO: Recebe 'days' do HTML
     """
     Dispara a verificação na Câmara e Senado e retorna o resultado para o site.
+    Aceita o parâmetro 'days' para definir a janela de busca (5, 15, 30).
     """
     try:
-        # Chama a função que criamos. Ela vai enviar pro Telegram E devolver a lista aqui.
         if 'check_and_process_legislativo' not in globals():
-             return {"count": 0, "message": "Módulo legislativo não carregado.", "data": []}
+             # Tenta importar dinamicamente se falhou no topo
+             try:
+                 from check_legislativo import check_and_process_legislativo
+             except ImportError:
+                 return {"count": 0, "message": "Módulo legislativo não carregado no servidor.", "data": []}
 
-        propostas = await check_and_process_legislativo()
+        # Chama a função passando o parametro de dias
+        propostas = await check_and_process_legislativo(only_new=False, days_back=days)
         
         if not propostas:
-            return {"count": 0, "message": "Nenhuma nova proposição encontrada nas últimas horas.", "data": []}
+             return {
+                 "count": 0, 
+                 "message": f"Nenhuma proposição encontrada nos últimos {days} dias com os termos monitorados.", 
+                 "data": []
+             }
             
         return {
             "count": len(propostas),
-            "message": f"Encontradas {len(propostas)} novas proposições relevantes.",
+            "message": f"Foram encontradas {len(propostas)} proposições nos últimos {days} dias.",
             "data": propostas
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no módulo legislativo: {str(e)}")
+
+Com essas duas alterações, o seletor "Últimos 30 dias" do site vai realmente mandar o comando para o Python buscar 30 dias para trás, e a função do Senado vai filtrar corretamente essa data.
 
 
 # =====================================================================================
