@@ -204,8 +204,13 @@ async def check_and_process_legislativo():
     if len(final_text) > 4000:
         final_text = final_text[:4000] + "\n\n(Relatório truncado por tamanho...)"
 
+# ... (código anterior de envio para o Telegram) ...
+    
     await send_telegram_message(final_text)
     print("Relatório Legislativo enviado ao Telegram.")
     
     # Salva o estado atualizado no HD
     save_state(processed_ids)
+
+    # --- [NOVO] RETORNA A LISTA PARA A API ---
+    return novas_propostas
