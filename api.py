@@ -1541,9 +1541,6 @@ async def endpoint_legislativo(days: int = Form(5)): # <--- ADICIONADO: Recebe '
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no módulo legislativo: {str(e)}")
 
-Com essas duas alterações, o seletor "Últimos 30 dias" do site vai realmente mandar o comando para o Python buscar 30 dias para trás, e a função do Senado vai filtrar corretamente essa data.
-
-
 # =====================================================================================
 # HEALTHCHECK E TESTE IA
 # =====================================================================================
