@@ -1,6 +1,5 @@
 # Nome do arquivo: check_legislativo.py
-# Módulo para monitorar Projetos de Lei via APIs Oficiais (Câmara e Senado)
-# Versão: 3.0 (Correção de Indentação e Filtro de Ano Senado)
+# Versão: 4.0 (DEBUG MODE - SENADO)
 
 import os
 import json
@@ -9,19 +8,10 @@ import httpx
 from datetime import datetime, timedelta
 from typing import List, Set, Dict
 
-# Tenta importar o enviador do Telegram (se existir no projeto)
-try:
-    from telegram import send_telegram_message
-except ImportError:
-    # Mock para testes locais sem telegram configurado
-    async def send_telegram_message(msg):
-        print(f"[TELEGRAM MOCK] {msg}")
-
 # --- CONFIGURAÇÃO ---
-# Arquivo para salvar quais PLs já avisamos (para não repetir)
 STATE_FILE_PATH = os.environ.get("LEG_STATE_FILE_PATH", "/dados/legislativo_state.json")
 
-# Palavras-chave Estratégicas da Marinha
+# Palavras-chave (Mantive as suas)
 KEYWORDS = [
     "Marinha do Brasil", 
     "Forças Armadas", 
@@ -48,15 +38,21 @@ KEYWORDS = [
     "Pensões Militares",
     "Soberania Nacional",
     "Almirantado",
-    "Corpo de Fuzileiros Navais"
+    "Corpo de Fuzileiros Navais",
+    "Brasil" # MANTENHA "BRASIL" PARA O TESTE DE CARGA!
 ]
 
-# URLs Oficiais das APIs
 URL_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 URL_SENADO = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista"
 
+# --- MOCK TELEGRAM (Para evitar erros de importação se o arquivo faltar) ---
+try:
+    from telegram import send_telegram_message
+except ImportError:
+    async def send_telegram_message(msg):
+        print(f"[TELEGRAM MOCK] {msg}")
+
 def load_state() -> Set[str]:
-    """Carrega IDs de propostas já processadas."""
     if not os.path.exists(STATE_FILE_PATH):
         return set()
     try:
@@ -66,41 +62,27 @@ def load_state() -> Set[str]:
         return set()
 
 def save_state(processed_ids: Set[str]):
-    """Salva o estado no disco."""
     try:
-        # Garante que o diretório existe
         dirname = os.path.dirname(STATE_FILE_PATH)
         if dirname and not os.path.exists(dirname):
             os.makedirs(dirname, exist_ok=True)
-            
         with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f:
             json.dump(list(processed_ids), f)
     except Exception as e:
-        print(f"Erro ao salvar estado legislativo: {e}")
+        print(f"Erro ao salvar estado: {e}")
 
-# --- CONSULTA CÂMARA ---
+# --- CÂMARA (Código Original - Funcional) ---
 async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[Dict]:
-    print(f">>> [API Câmara] Iniciando consulta desde {start_date_iso}...")
+    print(f">>> [API Câmara] Iniciando consulta...")
     results = []
-    
     for kw in KEYWORDS:
-        params = {
-            "dataInicio": start_date_iso,
-            "ordem": "DESC",
-            "ordenarPor": "id",
-            "keywords": kw,
-            "itens": 10 
-        }
+        params = {"dataInicio": start_date_iso, "ordem": "DESC", "ordenarPor": "id", "keywords": kw, "itens": 5}
         try:
-            # A API da Câmara é chata com headers, user-agent ajuda
-            headers = {"User-Agent": "RoboLegislativoMB/1.0"}
-            resp = await client.get(URL_CAMARA, params=params, headers=headers, timeout=15)
-            
+            resp = await client.get(URL_CAMARA, params=params, headers={"User-Agent": "RoboMB/1.0"}, timeout=10)
             if resp.status_code == 200:
-                dados = resp.json().get("dados", [])
-                for item in dados:
+                for item in resp.json().get("dados", []):
                     results.append({
-                        "uid": f"CAM_{item['id']}", # ID Único
+                        "uid": f"CAM_{item['id']}",
                         "casa": "Câmara",
                         "tipo": item['siglaTipo'],
                         "numero": str(item['numero']),
@@ -109,155 +91,138 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
                         "link": f"https://www.camara.leg.br/propostas-legislativas/{item['id']}",
                         "keyword": kw
                     })
-            # Respeita limite de taxa da API
-            await asyncio.sleep(0.2)
-        except Exception as e:
-            print(f"Erro API Câmara ({kw}): {e}")
-            
+            await asyncio.sleep(0.1)
+        except Exception: pass
     return results
 
-# --- CONSULTA SENADO (CORRIGIDA) ---
+# --- SENADO (VERSÃO DEBUG EXTREMO) ---
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
-    print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
+    print(f"\n>>> [DEBUG SENADO] Iniciando varredura profunda ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
+    # Data limite para filtrar
     limit_date = datetime.now() - timedelta(days=days_back_int)
-    
-    # Pega o ano atual para forçar a API a trazer coisas novas e não históricas
-    ano_atual = datetime.now().year 
+    ano_atual = datetime.now().year
 
     for kw in KEYWORDS:
-        # [IMPORTANTE] Filtro de ano na URL para evitar lixo histórico
-        url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}"
+        # Vamos remover o filtro de ano da URL para ver se ele traz QUALQUER COISA
+        # Se trouxer coisas velhas, a API funciona. Se não trouxer nada, a API mudou.
+        # url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}" <-- TENTEI ESSE ANTES
         
-        try:
-            resp = await client.get(url, headers=headers, timeout=15)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                
-                # Navegação segura no JSON complexo do Senado
-                pesquisa = data.get("PesquisaBasicaMateria", {})
-                if not pesquisa: continue
-                
-                materias_container = pesquisa.get("Materias", {})
-                if not materias_container: continue
-                
-                lista_materias = materias_container.get("Materia", [])
-                if isinstance(lista_materias, dict): 
-                    lista_materias = [lista_materias] # Normaliza se for 1 item
-                
-                # DEBUG: Remove comentário se quiser ver no log
-                # if len(lista_materias) > 0:
-                #    print(f"[DEBUG Senado] '{kw}' encontrou {len(lista_materias)} itens brutos.")
+        # Voltando ao URL básico para testar conexão:
+        url = f"{URL_SENADO}?palavraChave={kw}"
+        
+        print(f"--- [DEBUG] Consultando: {kw} ---")
+        # print(f"    URL: {url}") 
 
-                for mat in lista_materias:
-                    dados = mat.get("DadosBasicosMateria", {})
-                    data_apres = dados.get("DataApresentacao") # Pode vir como string YYYY-MM-DD
-                    
-                    if data_apres:
-                        try:
-                            # Pega apenas a data (primeiros 10 chars) e converte
-                            dt_obj = datetime.strptime(str(data_apres)[:10], "%Y-%m-%d")
-                            
-                            # Filtra: Se for mais recente que a data limite
-                            if dt_obj >= limit_date:
-                                results.append({
-                                    "uid": f"SEN_{dados.get('CodigoMateria')}",
-                                    "casa": "Senado",
-                                    "tipo": dados.get("SiglaMateria"),
-                                    "numero": dados.get("NumeroMateria"),
-                                    "ano": dados.get("AnoMateria"),
-                                    "ementa": dados.get("EmentaMateria"),
-                                    "link": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{dados.get('CodigoMateria')}",
-                                    "keyword": kw
-                                })
-                        except ValueError:
-                            continue
+        try:
+            resp = await client.get(url, headers=headers, timeout=20)
+            print(f"    Status Code: {resp.status_code}")
             
-            await asyncio.sleep(0.2) # Pausa leve
+            if resp.status_code != 200:
+                print(f"    ERRO HTTP: {resp.text[:200]}")
+                continue
+
+            data = resp.json()
+            
+            # Debug da Estrutura do JSON
+            pesquisa = data.get("PesquisaBasicaMateria", {})
+            if not pesquisa:
+                print("    AVISO: JSON veio sem 'PesquisaBasicaMateria'.")
+                continue
+                
+            materias_container = pesquisa.get("Materias", {})
+            if not materias_container:
+                print("    AVISO: 'Materias' vazio ou inexistente. (Nenhum resultado para esta palavra)")
+                continue
+            
+            lista_materias = materias_container.get("Materia", [])
+            # O Senado retorna um Dict se for só 1 item, e Lista se forem vários.
+            if isinstance(lista_materias, dict):
+                lista_materias = [lista_materias]
+            
+            print(f"    ENCONTRADOS: {len(lista_materias)} registros brutos.")
+
+            count_valid = 0
+            for mat in lista_materias:
+                dados = mat.get("DadosBasicosMateria", {})
+                cod = dados.get("CodigoMateria")
+                data_apres_raw = dados.get("DataApresentacao")
+                
+                # print(f"      > Analisando PL {cod} de {data_apres_raw}...")
+
+                if data_apres_raw:
+                    try:
+                        dt_obj = datetime.strptime(str(data_apres_raw)[:10], "%Y-%m-%d")
+                        
+                        if dt_obj >= limit_date:
+                            # print(f"        ✅ VÁLIDO! Data {dt_obj} é recente.")
+                            results.append({
+                                "uid": f"SEN_{cod}",
+                                "casa": "Senado",
+                                "tipo": dados.get("SiglaMateria"),
+                                "numero": dados.get("NumeroMateria"),
+                                "ano": dados.get("AnoMateria"),
+                                "ementa": dados.get("EmentaMateria"),
+                                "link": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{cod}",
+                                "keyword": kw
+                            })
+                            count_valid += 1
+                        else:
+                            pass
+                            # print(f"        ❌ Antigo. (Limite: {limit_date})")
+                    except Exception as e:
+                        print(f"        ⚠️ Erro ao processar data: {e}")
+            
+            if count_valid > 0:
+                print(f"    *** SUCESSO: {count_valid} matérias recentes adicionadas para '{kw}'. ***")
+
+            await asyncio.sleep(0.5) # Pausa para não bloquear IP
             
         except Exception as e:
-            print(f"Erro API Senado ({kw}): {e}")
+            print(f"    ERRO CRÍTICO na requisição: {e}")
 
     return results
 
-# --- FUNÇÃO PRINCIPAL (WORKER + API) ---
+# --- EXECUTOR ---
 async def check_and_process_legislativo(only_new: bool = True, days_back: int = 5) -> List[Dict]:
-    """
-    Orquestra a verificação.
-    :param only_new: Se True (Telegram/Robô), filtra o que já foi visto e só retorna novidades. 
-                     Se False (Site), retorna tudo o que encontrar na janela de tempo.
-    :param days_back: Quantos dias olhar para trás.
-    """
-    print(f"--- Iniciando Robô Legislativo (Modo: {'Apenas Novos' if only_new else 'Tudo'}, Dias: {days_back}) ---")
-    
+    print(f"--- Iniciando Robô Legislativo v4.0 (DEBUG) ---")
     processed_ids = load_state()
-    
-    # Define janela de tempo para a Câmara
     start_date_iso = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     
-    propostas_encontradas = [] # Lista final de retorno
-    novas_para_telegram = []   # Lista apenas para notificação
+    propostas_encontradas = []
+    novas_para_telegram = []
     
-    async with httpx.AsyncClient(timeout=40) as client:
-        # Busca nas duas casas
-        res_camara = await check_camara(client, start_date_iso)
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        # Primeiro checa Senado para vermos os logs logo
         res_senado = await check_senado(client, days_back)
+        res_camara = await check_camara(client, start_date_iso)
         
-        todas = res_camara + res_senado
+        todas = res_senado + res_camara
         
-        # Deduplica (mesma proposta pode aparecer em várias keywords)
         seen_now = set()
-        
         for p in todas:
-            if p['uid'] in seen_now:
-                continue
+            if p['uid'] in seen_now: continue
             seen_now.add(p['uid'])
-            
-            # Adiciona à lista geral (para o site ver tudo)
             propostas_encontradas.append(p)
             
-            # Verifica se é inédita para o Telegram
             if p['uid'] not in processed_ids:
                 novas_para_telegram.append(p)
-                processed_ids.add(p['uid']) # Marca como vista
+                processed_ids.add(p['uid'])
 
-    # Se for rodada automática do Robô, salva o estado e notifica
-    if only_new:
-        if not novas_para_telegram:
-            print("--- Nenhuma nova proposição legislativa encontrada (Background). ---")
-            return []
-        
-        # Monta o Relatório para Telegram
-        msg = [f"🏛️ *Monitoramento Legislativo - Novas Proposições*\n"]
-        
+    if only_new and novas_para_telegram:
+        msg = [f"🏛️ *Legislativo - Novas Proposições*\n"]
         for p in novas_para_telegram:
             icon = "🟢" if p['casa'] == "Câmara" else "🔵"
-            ementa_limpa = p['ementa'] or "Sem ementa."
-            ementa_curta = ementa_limpa[:250] + "..." if len(ementa_limpa) > 250 else ementa_limpa
-            
             msg.append(f"{icon} *{p['casa']}* | {p['tipo']} {p['numero']}/{p['ano']}")
-            msg.append(f"🔎 _Tema: {p['keyword']}_")
-            msg.append(f"📝 {ementa_curta}")
-            msg.append(f"🔗 [Ver Inteiro Teor]({p['link']})")
-            msg.append("---------------------------------------")
-
-        final_text = "\n".join(msg)
+            msg.append(f"🔎 {p['keyword']}")
+            msg.append(f"🔗 {p['link']}")
+            msg.append("---")
         
-        if len(final_text) > 4000:
-            final_text = final_text[:4000] + "\n\n(Relatório truncado...)"
-
-        await send_telegram_message(final_text)
-        print(f"Relatório Legislativo ({len(novas_para_telegram)} itens) enviado ao Telegram.")
-        
-        # Salva o estado atualizado no HD
+        await send_telegram_message("\n".join(msg)[:4000])
         save_state(processed_ids)
-        
         return novas_para_telegram
 
-    # Se for chamada do Site (only_new=False), apenas retorna a lista completa
-    # Também salvamos o estado para evitar repetição no Telegram
     save_state(processed_ids)
     return propostas_encontradas
