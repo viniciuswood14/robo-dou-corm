@@ -1,9 +1,9 @@
 # Nome do arquivo: api.py
-# Versão: 15.0.4 (FINAL - Seu Código Original + Frontend + Worker + Crawler Valor)
+# Versão: 15.0.5 (FINAL - Seu Código Original + Frontend + Worker + Crawler Valor)
 
 from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles # <--- ADIÇÃO 1: Servir arquivos estáticos
+from fastapi.staticfiles import StaticFiles # <--- ADIÇÃO: Servir arquivos estáticos
 from pydantic import BaseModel
 from typing import List, Optional, Set, Dict, Any
 from datetime import datetime
@@ -17,22 +17,26 @@ from bs4 import BeautifulSoup
 # IA / Gemini
 import google.generativeai as genai
 
-# Importa a função de busca do 'google_search.py'
-from google_search import perform_google_search, SearchResult
+# Importa a nova função de busca do 'google_search.py'
+try:
+    from google_search import perform_google_search, SearchResult
+except ImportError:
+    pass
 
 # Importações PAC
 import numpy as np
-from orcamentobr import despesa_detalhada
-
-# Importa a função de atualização do cache (para o endpoint manual)
-from check_pac import update_pac_historical_cache
+try:
+    from orcamentobr import despesa_detalhada
+    from check_pac import update_pac_historical_cache
+except ImportError:
+    pass
 
 # =====================================================================================
 # Robô DOU/Valor API
 # =====================================================================================
 
 app = FastAPI(
-    title="Robô DOU/Valor API - v15.0.4"
+    title="Robô DOU/Valor API - v15.0.5 (Unificado)"
 )
 
 app.add_middleware(
@@ -789,6 +793,7 @@ async def fetch_listing_html(client: httpx.AsyncClient, date: str) -> str:
         )
     return r.text
 
+# --- [FUNÇÃO CORRIGIDA: PEGA ZIPS MESMO COM NOMES DIFERENTES] ---
 def pick_zip_links_from_listing(
     html: str,
     base_url_for_rel: str,
@@ -796,7 +801,8 @@ def pick_zip_links_from_listing(
 ) -> List[str]:
     soup = BeautifulSoup(html, "html.parser")
     links: List[str] = []
-    # Normaliza as seções para uppercase e remove espaços
+    
+    # Normaliza as seções desejadas (ex: "DO1", "DO2")
     wanted = set(s.strip().upper() for s in only_sections) if only_sections else {"DO1"}
     
     print(f"DEBUG: Procurando seções {wanted} em {base_url_for_rel}")
@@ -825,6 +831,7 @@ def pick_zip_links_from_listing(
                 links.append(full_url)
     
     return sorted(list(set(links)))
+
 
 async def download_zip(client: httpx.AsyncClient, url: str) -> bytes:
     r = await client.get(url)
@@ -987,7 +994,6 @@ async def get_ai_analysis(
             return "Erro na análise de IA: Chave de API inválida."
         return "Erro na análise de IA: " + str(e)[:100]
 
-
 # =====================================================================================
 # FUNÇÕES AUXILIARES PARA O VALOR (CRAWLER)
 # =====================================================================================
@@ -1114,7 +1120,6 @@ async def run_valor_analysis(today_str: str, use_state: bool = True) -> (List[Di
                 })
 
     return pubs_finais, links_encontrados
-
 
 # =====================================================================================
 # /processar-dou-ia (COM IA) - Endpoint Lento (DOU)
@@ -1285,7 +1290,7 @@ async def processar_valor_ia(
 ):
     """
     Pipeline com IA (Valor Econômico):
-    - Chama a função interna 'run_valor_analysis'
+    - Chama a função interna 'run_valor_analysis' (agora com crawler)
     - NÃO usa o state, para permitir re-análise manual
     - Retorna o resultado formatado
     """
@@ -1370,10 +1375,8 @@ async def get_pac_historical_data():
             data = json.load(f)
         return data
     except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail="Arquivo de cache histórico não encontrado. O robô pode estar gerando o arquivo pela primeira vez. Tente novamente em alguns minutos."
-        )
+        # Retorna uma estrutura vazia válida se o arquivo ainda não existir
+        return {"labels": [], "datasets": []}
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1406,10 +1409,8 @@ async def get_pac_data(
     dados_brutos = [r for r in resultados_brutos if r is not None]
     
     if not dados_brutos:
-         raise HTTPException(
-            status_code=404,
-            detail=f"Nenhum dado encontrado para as ações do PAC em {ano}.",
-        )
+         # Retorna lista vazia em vez de 404 para não quebrar o front
+         return []
 
     # --- Monta a Tabela JSON para o Frontend ---
     tabela_final = []
