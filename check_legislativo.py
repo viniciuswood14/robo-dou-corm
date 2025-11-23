@@ -115,21 +115,26 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
     return results
 
 # --- CONSULTA SENADO ---
+# No arquivo check_legislativo.py
+
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
     print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
     limit_date = datetime.now() - timedelta(days=days_back_int)
+    ano_atual = datetime.now().year # Pega 2025 automaticamente
 
     for kw in KEYWORDS:
-        # O Senado busca na ementa ou indexação
-        url = f"{URL_SENADO}?palavraChave={kw}"
+        # --- CORREÇÃO AQUI: Adicionamos o filtro de ANO na URL ---
+        # Isso força a API a trazer coisas novas, senão ela traz coisas de 2010 que o Python ignora.
+        url = f"{URL_SENADO}?palavraChave={kw}&ano={ano_atual}"
+        
         try:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
-                # A estrutura do JSON do Senado é complexa e aninhada
+                
                 pesquisa = data.get("PesquisaBasicaMateria", {})
                 if not pesquisa: continue
                 
@@ -138,17 +143,17 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                 
                 lista_materias = materias_container.get("Materia", [])
                 if isinstance(lista_materias, dict): 
-                    lista_materias = [lista_materias] # Normaliza se for 1 item
+                    lista_materias = [lista_materias] 
                 
                 for mat in lista_materias:
                     dados = mat.get("DadosBasicosMateria", {})
-                    data_apres = dados.get("DataApresentacao", "")[:10] # YYYY-MM-DD
+                    data_apres = dados.get("DataApresentacao", "")[:10] 
                     
-                    # Filtra data manualmente (Senado não filtra na query da pesquisa textual)
                     if data_apres:
                         try:
                             dt_obj = datetime.strptime(data_apres, "%Y-%m-%d")
-                            # Pega apenas coisas dos últimos X dias
+                            
+                            # Verifica a janela de tempo (days_back)
                             if dt_obj >= limit_date:
                                 results.append({
                                     "uid": f"SEN_{dados.get('CodigoMateria')}",
