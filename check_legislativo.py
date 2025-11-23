@@ -1,5 +1,6 @@
 # Nome do arquivo: check_legislativo.py
 # Módulo para monitorar Projetos de Lei via APIs Oficiais (Câmara e Senado)
+# Versão: 2.0 (Suporte a filtro de dias e visualização no site)
 
 import os
 import json
@@ -44,7 +45,6 @@ KEYWORDS = [
     "programa nuclear da marinha",
     "Defesa Marítima",
     "fragata",
-    "amazônia azul",
     "Pensões Militares"
 ]
 
@@ -66,7 +66,10 @@ def save_state(processed_ids: Set[str]):
     """Salva o estado no disco."""
     try:
         # Garante que o diretório existe
-        os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
+        dirname = os.path.dirname(STATE_FILE_PATH)
+        if dirname and not os.path.exists(dirname):
+            os.makedirs(dirname, exist_ok=True)
+            
         with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f:
             json.dump(list(processed_ids), f)
     except Exception as e:
@@ -74,7 +77,7 @@ def save_state(processed_ids: Set[str]):
 
 # --- CONSULTA CÂMARA ---
 async def check_camara(client: httpx.AsyncClient, start_date: str) -> List[Dict]:
-    print(">>> [API Câmara] Iniciando consulta...")
+    print(f">>> [API Câmara] Iniciando consulta desde {start_date}...")
     results = []
     
     for kw in KEYWORDS:
@@ -83,7 +86,7 @@ async def check_camara(client: httpx.AsyncClient, start_date: str) -> List[Dict]
             "ordem": "DESC",
             "ordenarPor": "id",
             "keywords": kw,
-            "itens": 5  # Traz apenas as 5 mais recentes por palavra-chave
+            "itens": 10  # Aumentado para garantir captura em janelas maiores
         }
         try:
             # A API da Câmara é chata com headers, user-agent ajuda
@@ -104,15 +107,15 @@ async def check_camara(client: httpx.AsyncClient, start_date: str) -> List[Dict]
                         "keyword": kw
                     })
             # Respeita limite de taxa da API
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
         except Exception as e:
             print(f"Erro API Câmara ({kw}): {e}")
             
     return results
 
 # --- CONSULTA SENADO ---
-async def check_senado(client: httpx.AsyncClient) -> List[Dict]:
-    print(">>> [API Senado] Iniciando consulta...")
+async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
+    print(f">>> [API Senado] Iniciando consulta ({days_back_int} dias)...")
     results = []
     headers = {"Accept": "application/json", "User-Agent": "RoboLegislativoMB/1.0"}
     
@@ -142,8 +145,8 @@ async def check_senado(client: httpx.AsyncClient) -> List[Dict]:
                     if data_apres:
                         try:
                             dt_obj = datetime.strptime(data_apres, "%Y-%m-%d")
-                            # Pega apenas coisas dos últimos 5 dias
-                            if dt_obj >= datetime.now() - timedelta(days=5):
+                            # Pega apenas coisas dentro da janela solicitada
+                            if dt_obj >= datetime.now() - timedelta(days=days_back_int):
                                 results.append({
                                     "uid": f"SEN_{dados.get('CodigoMateria')}",
                                     "casa": "Senado",
@@ -155,74 +158,85 @@ async def check_senado(client: httpx.AsyncClient) -> List[Dict]:
                                     "keyword": kw
                                 })
                         except: pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
         except Exception as e:
             print(f"Erro API Senado ({kw}): {e}")
 
     return results
 
-# --- FUNÇÃO PRINCIPAL (WORKER) ---
-async def check_and_process_legislativo():
+# --- FUNÇÃO PRINCIPAL (WORKER + API) ---
+async def check_and_process_legislativo(only_new: bool = True, days_back: int = 5) -> List[Dict]:
     """
     Orquestra a verificação.
+    :param only_new: Se True (Telegram/Robô), filtra o que já foi visto e só retorna novidades. 
+                     Se False (Site), retorna tudo o que encontrar na janela de tempo.
+    :param days_back: Quantos dias olhar para trás.
     """
-    print("--- Iniciando Robô Legislativo (APIs Oficiais) ---")
+    print(f"--- Iniciando Robô Legislativo (Modo: {'Apenas Novos' if only_new else 'Tudo'}, Dias: {days_back}) ---")
     
     processed_ids = load_state()
     
-    # Define janela de tempo (últimos 5 dias para garantir que nada passou no fim de semana)
-    start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    # Define janela de tempo
+    start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     
-    novas_propostas = []
+    propostas_encontradas = [] # Lista final de retorno
+    novas_para_telegram = []   # Lista apenas para notificação
     
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Roda Câmara e Senado em paralelo para ganhar tempo? 
-        # Melhor sequencial com delay para não tomar block de IP por flood.
+    async with httpx.AsyncClient(timeout=40) as client:
         res_camara = await check_camara(client, start_date)
-        res_senado = await check_senado(client)
+        res_senado = await check_senado(client, days_back)
         
         todas = res_camara + res_senado
         
-        # Deduplica e filtra IDs já vistos
+        # Deduplica (mesma proposta pode aparecer em várias keywords)
         seen_now = set()
-        for p in todas:
-            if p['uid'] not in processed_ids and p['uid'] not in seen_now:
-                novas_propostas.append(p)
-                processed_ids.add(p['uid'])
-                seen_now.add(p['uid'])
-
-    if not novas_propostas:
-        print("--- Nenhuma nova proposição legislativa encontrada. ---")
-        return
-
-    # Monta o Relatório
-    msg = [f"🏛️ *Monitoramento Legislativo - Novas Proposições*\n"]
-    
-    for p in novas_propostas:
-        icon = "🟢" if p['casa'] == "Câmara" else "🔵"
-        ementa_curta = p['ementa'][:250] + "..." if len(p['ementa']) > 250 else p['ementa']
         
-        msg.append(f"{icon} *{p['casa']}* | {p['tipo']} {p['numero']}/{p['ano']}")
-        msg.append(f"🔎 _Tema: {p['keyword']}_")
-        msg.append(f"📝 {ementa_curta}")
-        msg.append(f"🔗 [Ver Inteiro Teor]({p['link']})")
-        msg.append("---------------------------------------")
+        for p in todas:
+            if p['uid'] in seen_now:
+                continue
+            seen_now.add(p['uid'])
+            
+            # Adiciona à lista geral (para o site ver tudo)
+            propostas_encontradas.append(p)
+            
+            # Verifica se é inédita para o Telegram
+            if p['uid'] not in processed_ids:
+                novas_para_telegram.append(p)
+                processed_ids.add(p['uid']) # Marca como vista
 
-    # Envia pro Telegram (em blocos se for muito grande)
-    final_text = "\n".join(msg)
-    
-    # Limite do Telegram é 4096 caracteres. Se passar, corta ou manda em partes.
-    # Aqui vamos mandar truncado por segurança.
-    if len(final_text) > 4000:
-        final_text = final_text[:4000] + "\n\n(Relatório truncado por tamanho...)"
+    # Se for rodada automática do Robô, salva o estado e notifica
+    if only_new:
+        if not novas_para_telegram:
+            print("--- Nenhuma nova proposição legislativa encontrada (Background). ---")
+            return []
+        
+        # Monta o Relatório para Telegram
+        msg = [f"🏛️ *Monitoramento Legislativo - Novas Proposições*\n"]
+        
+        for p in novas_para_telegram:
+            icon = "🟢" if p['casa'] == "Câmara" else "🔵"
+            ementa_curta = p['ementa'][:250] + "..." if p['ementa'] and len(p['ementa']) > 250 else p['ementa']
+            
+            msg.append(f"{icon} *{p['casa']}* | {p['tipo']} {p['numero']}/{p['ano']}")
+            msg.append(f"🔎 _Tema: {p['keyword']}_")
+            msg.append(f"📝 {ementa_curta}")
+            msg.append(f"🔗 [Ver Inteiro Teor]({p['link']})")
+            msg.append("---------------------------------------")
 
-# ... (código anterior de envio para o Telegram) ...
-    
-    await send_telegram_message(final_text)
-    print("Relatório Legislativo enviado ao Telegram.")
-    
-    # Salva o estado atualizado no HD
+        final_text = "\n".join(msg)
+        
+        if len(final_text) > 4000:
+            final_text = final_text[:4000] + "\n\n(Relatório truncado...)"
+
+        await send_telegram_message(final_text)
+        print(f"Relatório Legislativo ({len(novas_para_telegram)} itens) enviado ao Telegram.")
+        
+        # Salva o estado atualizado no HD
+        save_state(processed_ids)
+        
+        return novas_para_telegram
+
+    # Se for chamada do Site (only_new=False), apenas retorna a lista completa da janela de tempo
+    # Nota: Também salvamos o estado aqui para evitar que o robô notifique depois algo que o usuário já viu no site.
     save_state(processed_ids)
-
-    # --- [NOVO] RETORNA A LISTA PARA A API ---
-    return novas_propostas
+    return propostas_encontradas
