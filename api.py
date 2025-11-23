@@ -31,6 +31,12 @@ try:
 except ImportError:
     pass
 
+# --- [LEGISLATIVO] ---
+try:
+    from check_legislativo import check_and_process_legislativo
+except ImportError:
+    pass
+
 # =====================================================================================
 # Robô DOU/Valor API
 # =====================================================================================
@@ -1497,6 +1503,33 @@ async def force_update_pac():
     print("Forçando atualização do cache histórico do PAC...")
     await update_pac_historical_cache()
     return {"status": "Cache histórico atualizado com sucesso! Recarregue o dashboard."}
+
+# =====================================================================================
+# [NOVO] MONITORAMENTO LEGISLATIVO
+# =====================================================================================
+
+@app.post("/processar-legislativo")
+async def endpoint_legislativo():
+    """
+    Dispara a verificação na Câmara e Senado e retorna o resultado para o site.
+    """
+    try:
+        # Chama a função que criamos. Ela vai enviar pro Telegram E devolver a lista aqui.
+        if 'check_and_process_legislativo' not in globals():
+             return {"count": 0, "message": "Módulo legislativo não carregado.", "data": []}
+
+        propostas = await check_and_process_legislativo()
+        
+        if not propostas:
+            return {"count": 0, "message": "Nenhuma nova proposição encontrada nas últimas horas.", "data": []}
+            
+        return {
+            "count": len(propostas),
+            "message": f"Encontradas {len(propostas)} novas proposições relevantes.",
+            "data": propostas
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro no módulo legislativo: {str(e)}")
 
 
 # =====================================================================================
