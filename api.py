@@ -1509,22 +1509,32 @@ async def force_update_pac():
 # [NOVO] MONITORAMENTO LEGISLATIVO
 # =====================================================================================
 
+# No arquivo api.py
+
 @app.post("/processar-legislativo")
-async def endpoint_legislativo(days: int = Form(5)): # <--- ADICIONADO: Recebe 'days' do HTML
+async def endpoint_legislativo(days: int = Form(5)):
     """
     Dispara a verificação na Câmara e Senado e retorna o resultado para o site.
-    Aceita o parâmetro 'days' para definir a janela de busca (5, 15, 30).
     """
     try:
-        if 'check_and_process_legislativo' not in globals():
-             # Tenta importar dinamicamente se falhou no topo
-             try:
-                 from check_legislativo import check_and_process_legislativo
-             except ImportError:
-                 return {"count": 0, "message": "Módulo legislativo não carregado no servidor.", "data": []}
+        # 1. Tenta pegar a função do escopo global (importada no topo do arquivo)
+        func_check = globals().get('check_and_process_legislativo')
 
-        # Chama a função passando o parametro de dias
-        propostas = await check_and_process_legislativo(only_new=False, days_back=days)
+        # 2. Se não existir (falha na importação inicial), tenta importar agora dinamicamente
+        if not func_check:
+            try:
+                import check_legislativo
+                func_check = check_legislativo.check_and_process_legislativo
+            except ImportError:
+                return {
+                    "count": 0, 
+                    "message": "ERRO CRÍTICO: O arquivo 'check_legislativo.py' não foi encontrado no servidor.", 
+                    "data": []
+                }
+
+        # 3. Executa a função encontrada
+        # only_new=False -> Para o SITE mostrar tudo (não só novidades)
+        propostas = await func_check(only_new=False, days_back=days)
         
         if not propostas:
              return {
@@ -1538,7 +1548,10 @@ async def endpoint_legislativo(days: int = Form(5)): # <--- ADICIONADO: Recebe '
             "message": f"Foram encontradas {len(propostas)} proposições nos últimos {days} dias.",
             "data": propostas
         }
+
     except Exception as e:
+        # Imprime o erro no console do servidor para debug
+        print(f"Erro no endpoint legislativo: {e}")
         raise HTTPException(status_code=500, detail=f"Erro no módulo legislativo: {str(e)}")
 
 # =====================================================================================
