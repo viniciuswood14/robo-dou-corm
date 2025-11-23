@@ -42,6 +42,7 @@ KEYWORDS = [
     "empresa gerencial de projetos navais",
     "fundo de desenvolvimento do ensino profissional marítimo",
     "programa nuclear da marinha",
+    "Defesa Marítima",
     "amazônia azul",
     "Pensões Militares"
 ]
