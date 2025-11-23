@@ -33,6 +33,16 @@ KEYWORDS = [
     "Fundo Naval", 
     "Base Industrial de Defesa",
     "Carreira Militar",
+    "ministério da defesa",
+    "autoridade marítima",
+    "comando da marinha",
+    "fundo naval",
+    "amazônia azul tecnologias de defesa",
+    "caixa de construções de casas para o pessoal da marinha",
+    "empresa gerencial de projetos navais",
+    "fundo de desenvolvimento do ensino profissional marítimo",
+    "programa nuclear da marinha",
+    "amazônia azul",
     "Pensões Militares"
 ]
 
