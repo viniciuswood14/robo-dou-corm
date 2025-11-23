@@ -8,41 +8,72 @@
   <link rel="icon" href="favicon.ico" type="image/x-icon">
   <style>
     .leg-card {
-      border-left: 4px solid #ccc;
-      padding: 10px 15px;
+      border-left: 5px solid #ccc;
+      padding: 15px;
       margin-bottom: 15px;
-      background-color: #f8f9fa;
-      border-radius: 4px;
+      background-color: #fff;
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      transition: transform 0.2s;
+    }
+    .leg-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.15);
     }
     .leg-camara { border-left-color: #28a745; }
     .leg-senado { border-left-color: #0056b3; }
+    
+    .leg-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+
     .leg-badge {
-        font-size: 0.8em;
-        padding: 2px 6px;
-        border-radius: 4px;
+        font-size: 0.75em;
+        padding: 3px 8px;
+        border-radius: 12px;
         color: white;
         font-weight: bold;
         text-transform: uppercase;
+        letter-spacing: 0.5px;
     }
     .bg-camara { background-color: #28a745; }
     .bg-senado { background-color: #0056b3; }
     
-    /* Estilo do Select */
+    /* Container de Filtros */
     .filter-container {
         display: flex;
-        gap: 10px;
-        margin-bottom: 15px;
+        gap: 15px;
+        margin-bottom: 20px;
         align-items: center;
         justify-content: center;
-    }
-    select {
-        padding: 10px;
+        background: #f8f9fa;
+        padding: 15px;
         border-radius: 8px;
         border: 1px solid var(--border-color);
-        background-color: white;
-        font-size: 16px;
-        max-width: 200px;
     }
+    select {
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        font-size: 15px;
+        min-width: 180px;
+    }
+    
+    /* Loading Spinner Simples */
+    .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid var(--navy-blue);
+        border-radius: 50%;
+        width: 30px;
+        height: 30px;
+        animation: spin 1s linear infinite;
+        margin: 20px auto;
+        display: none;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -58,7 +89,7 @@
     </p>
 
     <div class="filter-container">
-        <label for="daysSelect">Período:</label>
+        <label for="daysSelect"><strong>Período de Análise:</strong></label>
         <select id="daysSelect">
             <option value="5" selected>Últimos 5 dias</option>
             <option value="15">Últimos 15 dias</option>
@@ -67,41 +98,44 @@
     </div>
 
     <div class="actions" style="justify-content: center;">
-      <button id="btnLegislativo" style="background-color: #4a4e69; border-color: #4a4e69; width: 100%;">
+      <button id="btnLegislativo" style="background-color: #4a4e69; border-color: #4a4e69; width: 100%; max-width: 400px;">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4 8 4v14"/><path d="M8 21v-9a4 4 0 1 1 8 0v9"/></svg>
         Verificar Câmara e Senado Agora
       </button>
     </div>
 
-    <div id="leg-results" style="margin-top: 20px;">
+    <div id="leg-container" style="margin-top: 20px;">
+        <div id="loading-spinner" class="spinner"></div>
         <p id="leg-status" class="hint" style="text-align: center;">Selecione o período e clique para iniciar.</p>
+        <div id="leg-results"></div>
     </div>
 
   </main>
 
   <script>
-      // Garante que a API_BASE está vazia para usar o mesmo domínio
+      // Se o JS e o Python estiverem na mesma origem, deixe vazio.
       const API_BASE = ""; 
 
-      document.getElementById("btnLegislativo").addEventListener("click", async () => {
-        const btn = document.getElementById("btnLegislativo");
-        const select = document.getElementById("daysSelect");
-        const container = document.getElementById("leg-results");
-        const status = document.getElementById("leg-status");
-        
-        const days = select.value; // Pega o valor selecionado (5, 15 ou 30)
+      const btn = document.getElementById("btnLegislativo");
+      const select = document.getElementById("daysSelect");
+      const resultsDiv = document.getElementById("leg-results");
+      const statusMsg = document.getElementById("leg-status");
+      const spinner = document.getElementById("loading-spinner");
 
+      btn.addEventListener("click", async () => {
+        const days = select.value; 
+
+        // 1. Estado de Carregamento
         btn.disabled = true;
-        btn.innerHTML = `Consultando últimos ${days} dias...`;
-        
-        // Limpa resultados anteriores
-        container.innerHTML = "";
-        status.style.display = "block";
-        status.textContent = `Aguarde... varrendo Câmara e Senado (${days} dias)...`;
-        container.appendChild(status);
+        btn.innerHTML = `Processando...`;
+        resultsDiv.innerHTML = ""; // Limpa resultados anteriores
+        statusMsg.style.display = "block";
+        statusMsg.textContent = `Varrendo APIs oficiais (Janela: ${days} dias). Aguarde...`;
+        statusMsg.style.color = "#666";
+        spinner.style.display = "block";
 
         try {
-            // Monta o Form Data com o parametro 'days'
+            // 2. Chamada à API
             const formData = new FormData();
             formData.append('days', days);
 
@@ -112,45 +146,64 @@
             
             const json = await res.json();
 
-            if (!res.ok) throw new Error(json.detail || "Erro na API");
+            if (!res.ok) throw new Error(json.detail || "Erro desconhecido na API");
 
-            status.style.display = "none";
+            // 3. Processamento do Sucesso
+            spinner.style.display = "none";
             
             if (json.count === 0) {
-                container.innerHTML = `<div class="preview" style="text-align: center;">✅ ${json.message}</div>`;
+                statusMsg.textContent = ""; // Limpa msg de loading
+                resultsDiv.innerHTML = `<div class="preview" style="text-align: center;">✅ ${json.message}</div>`;
             } else {
-                let html = `<div class="preview" style="background: #e8f5e9; color: #1b5e20; margin-bottom: 15px;">✅ ${json.message}</div>`;
+                statusMsg.style.display = "none"; // Esconde msg de loading
                 
+                // Cabeçalho de sucesso
+                let html = `<div class="preview" style="background: #e8f5e9; color: #1b5e20; margin-bottom: 15px; border-left: 4px solid #28a745;">
+                    ✅ <b>Concluído:</b> ${json.message}
+                </div>`;
+                
+                // Loop pelos resultados
                 json.data.forEach(p => {
                     const cssClass = p.casa === "Câmara" ? "leg-camara" : "leg-senado";
                     const badgeClass = p.casa === "Câmara" ? "bg-camara" : "bg-senado";
                     
-                    // Formata a data se disponível (extrai os 4 primeiros chars do ano ou usa regex se quiser sofisticar)
+                    // Fallbacks para dados vazios
+                    const tipoDoc = p.tipo || "DOC";
+                    const numDoc = p.numero || "?";
+                    const anoDoc = p.ano || "";
+                    const ementaDoc = p.ementa || "Sem ementa disponível.";
                     
                     html += `
                     <div class="leg-card ${cssClass}">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <div class="leg-header">
                             <span class="leg-badge ${badgeClass}">${p.casa}</span>
-                            <small style="color: #666;">${p.tipo} ${p.numero}/${p.ano}</small>
+                            <small style="color: #666; font-weight: bold;">${tipoDoc} ${numDoc}/${anoDoc}</small>
                         </div>
-                        <div style="font-weight: bold; color: #333; margin-bottom: 5px;">
-                            🔎 Tema: ${p.keyword}
+                        <div style="font-size: 0.9em; color: #555; margin-bottom: 8px;">
+                            <strong>Tema Monitorado:</strong> <span style="background-color: #fff3cd; padding: 2px 5px; border-radius: 3px;">${p.keyword}</span>
                         </div>
-                        <p style="font-size: 14px; margin-bottom: 10px; color: #212529;">
-                            ${p.ementa}
+                        <p style="font-size: 14px; margin-bottom: 12px; color: #212529; line-height: 1.4;">
+                            ${ementaDoc}
                         </p>
-                        <a href="${p.link}" target="_blank" style="font-size: 13px; text-decoration: underline; color: var(--navy-blue);">
-                            🔗 Ver Inteiro Teor na Fonte Oficial
-                        </a>
+                        <div style="text-align: right;">
+                            <a href="${p.link}" target="_blank" style="font-size: 13px; font-weight: bold; color: var(--navy-blue); text-decoration: none; border: 1px solid var(--navy-blue); padding: 4px 8px; border-radius: 4px;">
+                                🔗 Ver Inteiro Teor
+                            </a>
+                        </div>
                     </div>
                     `;
                 });
-                container.innerHTML = html;
+                resultsDiv.innerHTML = html;
             }
 
         } catch (err) {
-            container.innerHTML = `<div class="preview" style="color: red;">❌ Erro: ${err.message}</div>`;
+            spinner.style.display = "none";
+            statusMsg.style.display = "block";
+            statusMsg.style.color = "red";
+            statusMsg.textContent = `❌ Erro ao processar: ${err.message}`;
+            console.error(err);
         } finally {
+            // 4. Resetar Botão
             btn.disabled = false;
             btn.innerHTML = `
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4 8 4v14"/><path d="M8 21v-9a4 4 0 1 1 8 0v9"/></svg>
