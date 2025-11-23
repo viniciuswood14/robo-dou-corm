@@ -127,6 +127,7 @@ Critérios de Análise:
     "52000": "Ministério da Defesa")?
 2.  Se for ato normativo (Decreto, Portaria), qual a ação ou responsabilidade criada para a Marinha/Autoridade Marítima?
 3.  Se for ato de pessoal (Seção 2), mencionar o nome da pessoa e qual atividade/ação a ela designada. Exemplo de resposta: JOÃO DA SILVA foi nomeado para o cargo de Assessor Técnico.
+4.  Se for ato de pessoal (Seção 2), publicações do Serviço de Veteranos e Pensionistas da Marinha (SVPM), ignorar. 
 4.  Se a menção for trivial ou sem impacto direto (ex: 'Ministério da Defesa' apenas listado numa reunião, ou 'Marinha' no nome de uma empresa privada), responda APENAS: "Sem impacto direto."
 5.  Nunca alucinar ou inventar numeros. 
 
@@ -143,7 +144,7 @@ Sua tarefa é:
 2. Dizer quem é afetado (Ex.: Comando da Marinha, Fundo Naval, Defesa/52000).
 3. Se houver reforço de dotação ou acréscimo, deixe isso claro como positivo. Se houver cancelamento/redução, diga isso também.
 4. Se conseguir identificar os valores alterados, tambem mencionar, mas nunca alucione ou invente. 
-4. Entregar um texto formal para WhatsApp. Não omitir informações como nome e números.
+5. Entregar um texto formal para WhatsApp. Não omitir informações como nome e números.
 
 Você NÃO pode responder "Sem impacto direto", porque esta portaria JÁ foi marcada como relevante para a MB.
 
@@ -167,7 +168,6 @@ Sua tarefa é ler o TÍTULO e o RESUMO (snippet) de uma notícia do Valor Econô
 
 - Se for sobre Orçamento Federal, LDO, LOA, Teto de Gastos, Arcabouço Fiscal, etc., diga o impacto.
 - Se for sobre Fundos Públicos, analise se afeta a Marinha (Fundo Naval) ou o orçamento.
-- Se o título for genérico (ex: "Edição Impressa"), ignore.
 
 TÍTULO: {titulo}
 RESUMO: {resumo}
