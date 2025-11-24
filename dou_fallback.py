@@ -1,10 +1,11 @@
 # Nome do arquivo: dou_fallback.py
-# Versão: 5.0 (Sessão Persistente + Cookies + Debug Force)
+# Versão: 5.1 (Correção de Imports e Debug)
 
 import httpx
 import asyncio
 import json
 import unicodedata
+from datetime import datetime # <--- ADICIONADO (Faltava isso)
 from typing import List, Dict, Any
 
 # Endpoint oficial da Árvore de Leitura
@@ -58,22 +59,23 @@ def buscar_recursiva(no: Any, keywords_norm: List[str], resultados: List[Dict], 
 
 async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
     """
-    Orquestrador v5.0: Cria sessão, pega cookies e consulta API.
+    Orquestrador v5.1: Cria sessão, pega cookies e consulta API.
     """
-    # 1. Tratamento da Data
+    # 1. Tratamento da Data (Agora com Debug detalhado)
     try:
+        data_iso = data_iso.strip() # Remove espaços extras
         dt = datetime.strptime(data_iso, "%Y-%m-%d")
         data_pt = dt.strftime("%d-%m-%Y")
-        print(f"--- [FALLBACK v5] Data Alvo: {data_pt} ---", flush=True)
-    except:
-        print("❌ [FALLBACK] Erro no formato da data.", flush=True)
+        print(f"--- [FALLBACK v5.1] Data Alvo: {data_pt} (Input: {data_iso}) ---", flush=True)
+    except Exception as e:
+        print(f"❌ [FALLBACK] Erro ao processar data '{data_iso}': {e}", flush=True)
         return []
 
     # 2. Lista de Keywords (Sua lista estratégica)
     termos_criticos = [
         "marinha", "defesa", "comando", "almirante", "prosub", "amazul",
         "nuclear", "orcamento", "credito", "decreto", "portaria", "lei",
-        "aviso", "extrato", "52131", "52000", "suplementar"
+        "aviso", "extrato", "52131", "52000", "suplementar", "plano plurianual"
     ]
     # Normaliza e unifica
     lista_busca_norm = list(set(termos_criticos + [normalizar_texto(k) for k in keywords]))
