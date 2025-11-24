@@ -997,6 +997,62 @@ async def processar_inlabs(
     )
 
 # =====================================================================================
+# [NOVO] ENDPOINT DE TESTE DO FALLBACK
+# =====================================================================================
+@app.post("/teste-fallback", response_model=ProcessResponse)
+async def teste_fallback(
+    data: str = Form(..., description="YYYY-MM-DD"),
+    keywords_json: Optional[str] = Form(None)
+):
+    """
+    Endpoint exclusivo para testar a busca no in.gov.br (DOU Público)
+    sem tentar o InLabs antes.
+    """
+    if not executar_fallback:
+        raise HTTPException(status_code=500, detail="Módulo 'dou_fallback.py' não encontrado ou com erro.")
+
+    print(f">>> [TESTE] Iniciando Fallback Manual para {data}...")
+    
+    # Processa keywords (igual ao endpoint principal)
+    custom_keywords = []
+    if keywords_json:
+        try:
+            keywords_list = json.loads(keywords_json)
+            if isinstance(keywords_list, list):
+                custom_keywords = [str(k).strip().lower() for k in keywords_list if str(k).strip()]
+        except: pass
+
+    # Executa a busca pública
+    try:
+        fb_results = await executar_fallback(data, custom_keywords)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro no Fallback: {str(e)}")
+
+    # Converte para o modelo de Publicacao
+    pubs = []
+    for item in fb_results:
+        pubs.append(Publicacao(
+            organ=item['organ'],
+            type=item['type'],
+            summary=item['summary'],
+            raw=item['raw'],
+            relevance_reason=item['relevance_reason'],
+            section=item['section'],
+            clean_text=item['raw'] # Fallback usa o raw como texto
+        ))
+
+    # Monta o texto final
+    texto = monta_whatsapp(pubs, data)
+    texto = "🧪 *RELATÓRIO DE TESTE (FALLBACK/DOU PÚBLICO)*\n\n" + texto
+
+    return ProcessResponse(
+        date=data,
+        count=len(pubs),
+        publications=pubs,
+        whatsapp_text=texto
+    )
+
+# =====================================================================================
 # IA helper
 # =====================================================================================
 async def get_ai_analysis(
