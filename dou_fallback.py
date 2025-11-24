@@ -1,68 +1,72 @@
 # Nome do arquivo: dou_fallback.py
-# Versão: 6.1 (Correção Crítica de Parâmetros: do1 -> dou1)
+# Versão: 7.0 (Sessão Real + IDs Numéricos + Varredura de Script)
 
 import httpx
 import asyncio
 import json
+import re
 import unicodedata
 from datetime import datetime
 from typing import List, Dict, Any
 
-# Endpoint da árvore JSON
+# URLs Oficiais
 BASE_URL = "https://www.in.gov.br"
-LEITURA_API = "https://www.in.gov.br/leitura/-/leitura/dou"
+PAGE_URL = "https://www.in.gov.br/leiturajornal"
+API_URL = "https://www.in.gov.br/leitura/-/leitura/dou"
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
     return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII').lower()
 
-def buscar_recursiva(no: Any, keywords_norm: List[str], resultados: List[Dict], secao: str):
-    """ Percorre a árvore JSON procurando títulos. """
+def extrair_materias_da_arvore(no: Any, keywords_norm: List[str], resultados: List[Dict], secao_nome: str):
+    """ Percorre a árvore JSON (nós e folhas) procurando matérias. """
     if isinstance(no, list):
         for item in no:
-            buscar_recursiva(item, keywords_norm, resultados, secao)
+            extrair_materias_da_arvore(item, keywords_norm, resultados, secao_nome)
         return
 
     if isinstance(no, dict):
+        # Tenta identificar título e link
         titulo = no.get("text") or no.get("name") or ""
         url_title = no.get("urlTitle")
-        file_id = no.get("fileId")
         
-        if titulo and (url_title or file_id):
+        # É uma matéria válida?
+        if titulo and url_title:
             titulo_norm = normalizar_texto(titulo)
+            
+            # Verifica keywords
             for kw in keywords_norm:
                 if kw in titulo_norm:
-                    if url_title:
-                        link = f"https://www.in.gov.br/web/dou/-/{url_title}"
-                    else:
-                        continue 
-
-                    resultados.append({
-                        "organ": "DOU (Fallback JSON)",
-                        "type": "Matéria",
-                        "summary": titulo,
-                        "raw": f"{titulo}\nLink: {link}",
-                        "relevance_reason": f"Encontrado na árvore (v6.1) pelo termo: '{kw}'",
-                        "section": secao.upper(),
-                        "link": link
-                    })
-                    break
+                    link = f"https://www.in.gov.br/web/dou/-/{url_title}"
+                    
+                    # Evita duplicatas na lista final
+                    if not any(r['link'] == link for r in resultados):
+                        resultados.append({
+                            "organ": "DOU (Redundância)",
+                            "type": "Matéria",
+                            "summary": titulo,
+                            "raw": f"{titulo}\nLink: {link}",
+                            "relevance_reason": f"[Fallback] Termo encontrado: '{kw}'",
+                            "section": secao_nome,
+                            "link": link
+                        })
+                    break 
         
+        # Recursão para filhos
         children = no.get("children") or no.get("subordinados")
         if children:
-            buscar_recursiva(children, keywords_norm, resultados, secao)
+            extrair_materias_da_arvore(children, keywords_norm, resultados, secao_nome)
 
 async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
-    # 1. Prepara múltiplas versões da data
+    # 1. Configura Data
     try:
         dt = datetime.strptime(data_iso.strip(), "%Y-%m-%d")
-        data_traco = dt.strftime("%d-%m-%Y") # 21-11-2025
-        data_barra = dt.strftime("%d/%m/%Y") # 21/11/2025
+        data_pt = dt.strftime("%d-%m-%Y") # Formato URL (21-11-2025)
     except Exception as e:
-        print(f"❌ [FALLBACK] Erro na data: {e}", flush=True)
+        print(f"❌ [FALLBACK] Erro data: {e}", flush=True)
         return []
 
-    # 2. Keywords
+    # 2. Lista de Keywords
     termos_criticos = [
         "marinha", "defesa", "comando", "almirante", "prosub", "amazul",
         "nuclear", "orcamento", "credito", "decreto", "portaria", "lei",
@@ -70,72 +74,81 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
     ]
     lista_busca_norm = list(set(termos_criticos + [normalizar_texto(k) for k in keywords]))
 
-    # 3. MATRIZ DE TENTATIVAS (Agora com 'dou1' que é o correto)
-    # O site aceita variações dependendo da rota, vamos testar todas
-    combinacoes = [
-        {"data": data_traco, "secao": "dou1"},  # Padrão descoberto pelo usuário (Traço + dou1)
-        {"data": data_traco, "secao": "do1"},   # Padrão antigo (Traço + do1)
-        {"data": data_barra, "secao": "dou1"},  # Barra + dou1
-        {"data": data_traco, "jornal": "dou1"}, # Parametro 'jornal'
-        {"data": data_traco, "jornal": "do1"}
-    ]
+    print(f"--- [FALLBACK v7.0] Iniciando para {data_pt} ---", flush=True)
 
-    print(f"--- [FALLBACK v6.1] Iniciando varredura para {data_traco} ---", flush=True)
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.in.gov.br/leitura",
-        "X-Requested-With": "XMLHttpRequest"
-    }
+    # 3. Mapeamento de Seções (Nome -> ID Interno do Liferay)
+    # 515 = DO1, 525 = DO2, 529 = DO3, 600 = Extra
+    mapa_secoes = [
+        {"nome": "DO1", "params": {"secao": "dou1", "data": data_pt}, "api_jornal": 515},
+        {"nome": "DO2", "params": {"secao": "dou2", "data": data_pt}, "api_jornal": 525},
+        {"nome": "DOE", "params": {"secao": "doue", "data": data_pt}, "api_jornal": 600} 
+    ]
 
     resultados = []
     
-    # Mapeia as seções para o código correto de busca
-    # Se 'dou1' funcionar para a Seção 1, 'dou2' deve ser a Seção 2 e 'doue' a Extra
-    secoes_alvo = ["dou1", "dou2", "doue"] 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=40, follow_redirects=True, headers=headers) as client:
+        
+        # PASSO A: Acessar a Home para pegar Cookies iniciais
         try:
-            # Aquece a sessão
             await client.get(BASE_URL)
+        except: pass
 
-            for sec_cod in secoes_alvo:
-                sucesso_secao = False
+        for sec in mapa_secoes:
+            nome = sec["nome"]
+            print(f"📡 Processando {nome}...", flush=True)
+            
+            try:
+                # PASSO B: Visita a página 'leiturajornal' (Igual navegador)
+                # Isso define o cookie de sessão para a data e seção corretas
+                resp_page = await client.get(PAGE_URL, params=sec["params"])
                 
-                # Tenta as combinações
-                for tentativa in combinacoes:
-                    params = {}
-                    
-                    # Adapta o código da seção para a tentativa atual
-                    # Se a tentativa usa 'do1', convertemos 'dou1' -> 'do1'
-                    cod_tentativa = sec_cod
-                    if "do1" in tentativa.get("secao", "") or "do1" in tentativa.get("jornal", ""):
-                        cod_tentativa = sec_cod.replace("dou", "do") # dou1 -> do1
-                    
-                    if "secao" in tentativa: params["secao"] = cod_tentativa
-                    if "jornal" in tentativa: params["jornal"] = cod_tentativa
-                    params["data"] = tentativa["data"]
+                arvore_encontrada = None
 
+                # Tenta achar a variável jsonArray no HTML (Método Ninja)
+                # O Liferay imprime: var jsonArray = [...];
+                match = re.search(r'var\s+jsonArray\s*=\s*(\[.*?\]);', resp_page.text, re.DOTALL)
+                if match:
                     try:
-                        resp = await client.get(LEITURA_API, params=params)
-                        
-                        if resp.status_code == 200:
-                            arvore = resp.json()
-                            if not arvore: continue # JSON vazio
-                                
-                            print(f"   ✅ SUCESSO na {sec_cod}! (Params: {params})", flush=True)
-                            buscar_recursiva(arvore, lista_busca_norm, resultados, sec_cod)
-                            sucesso_secao = True
-                            break 
-                        
-                    except json.JSONDecodeError: pass
-                    except Exception: pass
+                        json_str = match.group(1)
+                        arvore_encontrada = json.loads(json_str)
+                        # print(f"   ✅ Estrutura JSON extraída do HTML de {nome}!", flush=True)
+                    except: pass
+                
+                # Se não achou no HTML, tenta a API usando o ID numérico (Método Clássico)
+                if not arvore_encontrada:
+                    # print(f"   Science: Tentando API direta para jornal={sec['api_jornal']}...", flush=True)
+                    # Nota: A API usa params ligeiramente diferentes dependendo da versão
+                    params_api = {"jornal": sec['api_jornal'], "data": data_pt, "json": "true"}
+                    
+                    # Headers específicos para simular AJAX
+                    headers_api = headers.copy()
+                    headers_api["X-Requested-With"] = "XMLHttpRequest"
+                    
+                    resp_api = await client.get(API_URL, params=params_api, headers=headers_api)
+                    if resp_api.status_code == 200:
+                        try:
+                            arvore_encontrada = resp_api.json()
+                        except: pass
 
-                if not sucesso_secao:
-                    print(f"   ⚠️ Seção {sec_cod} vazia ou inacessível.", flush=True)
+                # PASSO C: Processa o que encontrou
+                if arvore_encontrada:
+                    count_antes = len(resultados)
+                    extrair_materias_da_arvore(arvore_encontrada, lista_busca_norm, resultados, nome)
+                    delta = len(resultados) - count_antes
+                    if delta > 0:
+                         print(f"   ✅ {delta} matérias relevantes encontradas na {nome}.", flush=True)
+                    else:
+                         print(f"   ℹ️ Jornal lido, mas nenhuma keyword encontrada na {nome}.", flush=True)
+                else:
+                    print(f"   ⚠️ Falha ao ler estrutura da {nome} (HTML ou API vazios).", flush=True)
 
-        except Exception as e:
-            print(f"❌ [ERRO CRÍTICO]: {e}", flush=True)
+            except Exception as e:
+                print(f"   ❌ Erro na seção {nome}: {e}", flush=True)
 
-    print(f"📊 [FIM] Matérias recuperadas: {len(resultados)}", flush=True)
+    print(f"📊 [FIM FALLBACK] Total Final: {len(resultados)}", flush=True)
     return resultados
