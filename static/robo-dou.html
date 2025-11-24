@@ -45,14 +45,22 @@
         Analisar Valor (IA)
       </button>
       </div>
-    <div class="actions" style="margin-top: -10px;">
+
+      <div class="actions" style="margin-top: 10px;">
+        <button id="btnTesteFallback" style="background-color: #6c757d; border-color: #6c757d;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+            Testar Fallback (Site Público)
+        </button>
+      </div>
+    
+    <div class="actions" style="margin-top: 10px;">
         <button id="btnCopiar" disabled>Copiar Relatório</button>
     </div>
     
     <p class="hint" style="margin-top: -10px; margin-bottom: 20px;">
       <b>DOU (Rápido):</b> Apenas filtra o DOU por palavras-chave.<br>
-      <b>DOU (IA):</b> Filtra o DOU e usa IA para analisar o impacto (lento).<br>
-      <b>Valor (IA):</b> Busca notícias no Valor Econômico do dia e usa IA para analisar (requer API do Google).
+      <b>DOU (IA):</b> Filtra o DOU e usa IA para analisar o impacto.<br>
+      <b>Testar Fallback:</b> Simula erro no InLabs e busca direto no site público (in.gov.br).
     </p>
 
     <pre id="preview" class="preview" aria-live="polite">Aguardando comando...</pre>
