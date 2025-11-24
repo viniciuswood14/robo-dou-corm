@@ -29,8 +29,6 @@ async def buscar_dou_publico(termo: str, data_pt: str, secao: str = "do1") -> Li
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    # print(f"[Fallback DOU] Buscando '{termo}' em {data_pt} ({secao})...") # Debug opcional
-
     async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
         try:
             resp = await client.get(SEARCH_URL, params=params, headers=headers)
@@ -38,6 +36,8 @@ async def buscar_dou_publico(termo: str, data_pt: str, secao: str = "do1") -> Li
                 return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Tenta encontrar resultados nos scripts do Liferay (estrutura comum do site)
             script_results = soup.find_all("h5", class_="title-marker")
 
             for item in script_results:
@@ -53,13 +53,16 @@ async def buscar_dou_publico(termo: str, data_pt: str, secao: str = "do1") -> Li
                 if parent:
                     p_tag = parent.find("p", class_="abstract-marker")
                     if p_tag: abstract = p_tag.get_text(strip=True)
+                
+                # Combina título e resumo para a IA analisar
+                texto_bruto = f"{title}\n{abstract}"
 
                 results.append({
                     "organ": "DOU Público (Fallback)",
                     "type": "Resultado de Busca",
                     "summary": title,
-                    "raw": f"{title}\n{abstract}\nLink: {full_link}",
-                    "relevance_reason": f"Encontrado via busca de redundância pelo termo: '{termo}'",
+                    "raw": texto_bruto,
+                    "relevance_reason": f"Encontrado via busca pública por: '{termo}'",
                     "section": secao.upper(),
                     "link": full_link
                 })
@@ -72,7 +75,6 @@ async def buscar_dou_publico(termo: str, data_pt: str, secao: str = "do1") -> Li
 async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
     """
     Orquestrador da Redundância.
-    Converte a data e dispara buscas paralelas para todas as keywords críticas.
     """
     try:
         dt = datetime.strptime(data_iso, "%Y-%m-%d")
@@ -80,9 +82,9 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
     except:
         return []
 
-    # Lista CORRIGIDA de termos (apenas strings)
+    # Lista CORRIGIDA de termos (apenas strings, sem chaves/valores)
     termos_criticos = [
-        # Termos Estratégicos Principais
+        # Termos Gerais
         "Marinha do Brasil",
         "Comando da Marinha",
         "Orçamento Fiscal",
@@ -106,7 +108,7 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
         "52932", # Fundo D.E.P.M.
         "52000", # MD
 
-        # Instrumentos Orçamentários e Siglas
+        # Termos Orçamentários
         "Fundos Públicos",
         "Relatório de Avaliação de Receitas e Despesas Primárias",
         "RARDP",
@@ -117,8 +119,6 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
         "Lei de Diretrizes Orçamentárias",
         "Lei Orçamentária",
         "Plano Plurianual",
-        
-        # Gatilhos de Ação Orçamentária
         "Altera grupos de natureza de despesa",
         "Limites de movimentação",
         "Limites de pagamento",
@@ -126,20 +126,19 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
         "Movimentação e empenho"
     ]
     
-    # Junta com as keywords personalizadas do usuário e remove duplicatas
+    # Junta com as keywords do usuário
     lista_busca = list(set(termos_criticos + keywords))
     
     print(f"[Fallback] Iniciando busca paralela para {len(lista_busca)} termos...")
 
     tasks = []
     for kw in lista_busca:
-        # Busca na Seção 1 (Atos Normativos/Orçamento) que é a mais crítica
         tasks.append(buscar_dou_publico(kw, data_pt, "do1")) 
     
     # Executa tudo em paralelo
     resultados_matrix = await asyncio.gather(*tasks)
     
-    # Organiza e deduplica os resultados
+    # Organiza e deduplica
     final_pubs = []
     seen_links = set()
     
