@@ -1,173 +1,139 @@
 # Nome do arquivo: dou_fallback.py
-# Versão: 3.0 (Crawler de Links - Método Blindado)
+# Versão: 4.0 (API de Leitura JSON - Método Robusto)
 
 import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime
 import asyncio
-import random
-import re
-from typing import List, Dict
+import json
+import unicodedata
+from typing import List, Dict, Any
 
-# URL de Busca Oficial do DOU
-SEARCH_URL = "https://www.in.gov.br/consulta/-/buscar/dou"
+# Endpoint que retorna a ESTRUTURA COMPLETA do jornal do dia em JSON
+LEITURA_URL = "https://www.in.gov.br/leitura/-/leitura/dou"
 
-async def buscar_dou_publico(termo: str, data_pt: str, secao: str = "do1") -> List[Dict]:
+def normalizar_texto(texto: str) -> str:
+    """Remove acentos e coloca em minúsculas para comparação."""
+    if not texto: return ""
+    return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII').lower()
+
+def buscar_recursiva(no: Any, keywords_norm: List[str], resultados: List[Dict], secao: str):
     """
-    Busca resiliente: Procura por padrões de LINK em vez de classes CSS específicas.
+    Percorre a árvore JSON do DOU procurando matérias que batem com as keywords.
     """
-    results = []
+    # Se for uma lista, itera sobre os itens
+    if isinstance(no, list):
+        for item in no:
+            buscar_recursiva(item, keywords_norm, resultados, secao)
+        return
+
+    # Se for um dicionário (nó da árvore)
+    if isinstance(no, dict):
+        # Verifica se é uma folha (matéria) ou nó (pasta)
+        # Matérias geralmente tem 'urlTitle' ou 'id'
+        
+        titulo = no.get("name") or no.get("text") or ""
+        url_title = no.get("urlTitle")
+        
+        # Se tem título e urlTitle, é uma matéria potencial
+        if titulo and url_title:
+            titulo_norm = normalizar_texto(titulo)
+            
+            # Verifica se alguma keyword está no título
+            for kw in keywords_norm:
+                if kw in titulo_norm:
+                    link = f"https://www.in.gov.br/web/dou/-/{url_title}"
+                    
+                    # Adiciona aos resultados
+                    resultados.append({
+                        "organ": "DOU (API Leitura)",
+                        "type": "Matéria",
+                        "summary": titulo,
+                        "raw": f"{titulo}\nLink: {link}",
+                        "relevance_reason": f"Encontrado na árvore de leitura pelo termo: '{kw}'",
+                        "section": secao.upper(),
+                        "link": link
+                    })
+                    break # Já achou uma keyword, não precisa testar as outras
+        
+        # Continua descendo na árvore (filhos)
+        children = no.get("children") or no.get("subordinados")
+        if children:
+            buscar_recursiva(children, keywords_norm, resultados, secao)
+
+
+async def buscar_dou_api_leitura(data_pt: str, keywords: List[str], secao: str = "do1") -> List[Dict]:
+    """
+    Baixa o JSON da árvore do jornal e filtra localmente.
+    """
+    print(f"[Fallback v4] Baixando estrutura do DOU de {data_pt} ({secao})...")
     
-    # Parâmetros de busca
     params = {
-        "q": f'"{termo}"',
-        "s": secao,
-        "exact": "true",
-        "dt": data_pt,
-        "dtEnd": data_pt,
-        "sortType": "0"
+        "data": data_pt,
+        "secao": secao
     }
     
-    # Headers simplificados para evitar bloqueio por excesso de especificidade
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "X-Requested-With": "XMLHttpRequest" # Importante para APIs Liferay
     }
-
-    # print(f"[DEBUG] Buscando: '{termo}' em {data_pt}...")
 
     async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
         try:
-            # Delay aleatório para não sobrecarregar o servidor
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-            
-            resp = await client.get(SEARCH_URL, params=params, headers=headers)
+            resp = await client.get(LEITURA_URL, params=params, headers=headers)
             
             if resp.status_code != 200:
-                print(f"❌ [ERRO HTTP] Termo: '{termo}' | Status: {resp.status_code}")
+                print(f"❌ [ERRO HTTP] API Leitura: {resp.status_code}")
                 return []
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            # Tenta processar o JSON
+            try:
+                arvore_json = resp.json()
+            except json.JSONDecodeError:
+                print(f"❌ [ERRO JSON] A resposta não é um JSON válido. Pode ser HTML de erro.")
+                return []
             
-            # --- LÓGICA "TRATOR" (BUSCA POR LINKS) ---
-            # Em vez de procurar classes CSS que mudam, procuramos o padrão do link
-            # Padrão de link do DOU: /web/dou/-/titulo-da-materia-ID
+            # Prepara keywords normalizadas para busca rápida
+            kw_norm = [normalizar_texto(k) for k in keywords]
             
-            found_links = soup.find_all("a", href=re.compile(r"/web/dou/-/"))
+            resultados = []
+            buscar_recursiva(arvore_json, kw_norm, resultados, secao)
             
-            # Se não achou links diretos, tenta verificar se está dentro de scripts (JSON oculto)
-            if not found_links:
-                 # Fallback do Fallback: Tenta regex no texto bruto caso seja renderizado via JS
-                 raw_links = re.findall(r'href="(/web/dou/-/[^"]+)"', resp.text)
-                 # (Implementação simplificada: se achou via regex, teríamos que limpar o título manualmente)
-                 # Por enquanto, confiamos no Beautifulsoup
-
-            processed_urls = set()
-
-            for tag in found_links:
-                href = tag.get("href")
-                if not href: continue
-                
-                # Garante URL completa
-                full_link = f"https://www.in.gov.br{href}" if href.startswith("/") else href
-                
-                # Evita duplicatas (título e imagem costumam ter o mesmo link)
-                if full_link in processed_urls:
-                    continue
-                processed_urls.add(full_link)
-
-                # Extrai o Título (texto do link ou title attribute)
-                title = tag.get_text(strip=True)
-                if not title:
-                    title = tag.get("title", "")
-                
-                if len(title) < 5: # Ignora links quebrados ou ícones sem texto
-                    continue
-
-                # Tenta achar o "Resumo" (geralmente está num parágrafo próximo ou irmão)
-                # Estrutura comum: <div> <a>Titulo</a> <p>Resumo</p> </div>
-                abstract = ""
-                parent = tag.find_parent("div")
-                if parent:
-                    # Pega todo o texto do container pai, removendo o título
-                    full_text = parent.get_text(" ", strip=True)
-                    abstract = full_text.replace(title, "").strip()[:300] + "..." # Limita tamanho
-
-                # Monta o objeto
-                item_final = {
-                    "organ": "DOU Público (Fallback)",
-                    "type": "Resultado de Busca",
-                    "summary": title,
-                    "raw": f"{title}\n{abstract}",
-                    "relevance_reason": f"Busca Pública: '{termo}'",
-                    "section": secao.upper(),
-                    "link": full_link
-                }
-                
-                results.append(item_final)
-            
-            if results:
-                print(f"✅ [SUCESSO] '{termo}': {len(results)} encontrados.")
+            return resultados
 
         except Exception as e:
-            print(f"❌ [EXCEÇÃO] Erro ao buscar '{termo}': {e}")
-
-    return results
+            print(f"❌ [EXCEÇÃO] Erro na API Leitura: {e}")
+            return []
 
 async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
-    """
-    Orquestrador da Redundância.
-    """
     try:
         dt = datetime.strptime(data_iso, "%Y-%m-%d")
         data_pt = dt.strftime("%d-%m-%Y")
     except:
         return []
 
-    # Lista de termos
+    # Lista de termos (Reduzida para focar no que aparece em Títulos de matérias na árvore)
+    # A árvore geralmente traz o título do ato (Ex: "Portaria nº 123"). 
+    # Termos genéricos como "Orçamento" podem não aparecer no título, mas as UGs sim.
     termos_criticos = [
-        "Marinha do Brasil",
-        "Comando da Marinha",
-        "Orçamento Fiscal",
-        "Crédito Suplementar",
-        "Remanejamento",
-        "Ministério da Defesa",
+        "Marinha",
+        "Defesa",
         "PROSUB",
         "Amazul",
-        "Forças Armadas",
-        "Autoridade Marítima",
-        "Empresa Gerencial de Projetos Navais",
-        "Programa Nuclear Brasileiro",
-        "Amazônia Azul",
-        "52131", "52133", "52232", "52233", "52931", "52932", "52000",
-        "Fundos Públicos",
-        "RARDP",
-        "Programação Orçamentária e Financeira",
-        "DPOF",
-        "Lei Orçamentária",
-        "Plano Plurianual",
-        "Movimentação e empenho"
+        "Nuclear",
+        "Orçamento",
+        "Crédito",
+        "Decreto",
+        "Portaria",
+        "Lei"
     ]
     
+    # Junta com as keywords do usuário
     lista_busca = list(set(termos_criticos + keywords))
     
-    print(f"--- INICIANDO FALLBACK V3 (Links) ---")
-    print(f"Data: {data_pt} | Termos: {len(lista_busca)}")
-
-    tasks = []
-    for kw in lista_busca:
-        tasks.append(buscar_dou_publico(kw, data_pt, "do1")) 
+    print(f"--- INICIANDO FALLBACK V4 (API JSON) ---")
     
-    resultados_matrix = await asyncio.gather(*tasks)
+    # Busca apenas na Seção 1 (DO1) que é a principal
+    # Se quiser DO2 e DO3, teria que fazer mais requisições
+    resultados = await buscar_dou_api_leitura(data_pt, lista_busca, "do1")
     
-    final_pubs = []
-    seen_links = set()
-    
-    for lista in resultados_matrix:
-        for item in lista:
-            if item['link'] not in seen_links:
-                final_pubs.append(item)
-                seen_links.add(item['link'])
-    
-    print(f"--- FIM DO FALLBACK: {len(final_pubs)} itens únicos encontrados ---")
-    return final_pubs
+    print(f"--- FIM DO FALLBACK: {len(resultados)} itens encontrados na árvore ---")
+    return resultados
