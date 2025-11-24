@@ -1,12 +1,13 @@
 document.addEventListener("DOMContentLoaded", function() {
 
-  // 👉 Troque para a URL do seu backend no Render:
+  // 👉 Troque para a URL do seu backend no Render se necessário, ou deixe vazio para relativo:
   const API_BASE = "";
 
   const el = (id) => document.getElementById(id);
   const btnProcessar = el("btnProcessar");
   const btnProcessarIA = el("btnProcessarIA");
-  const btnProcessarValor = el("btnProcessarValor"); // [NOVO]
+  const btnProcessarValor = el("btnProcessarValor");
+  const btnTesteFallback = el("btnTesteFallback"); // [NOVO]
   const btnCopiar = el("btnCopiar");
   const preview = el("preview");
 
@@ -18,7 +19,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
   })();
 
-  // Função central de processamento (MODIFICADA)
+  // Função central de processamento
   async function handleProcessing(endpoint) {
     const data = el("data").value.trim();
     const sections = el("sections").value.trim() || "DO1,DO2";
@@ -35,7 +36,10 @@ document.addEventListener("DOMContentLoaded", function() {
     let loadingText = "Processando, aguarde…";
 
     // Adiciona campos específicos do DOU
-    if (endpoint.startsWith("/processar-dou") || endpoint.startsWith("/processar-inlabs")) {
+    if (endpoint.startsWith("/processar-dou") || 
+        endpoint.startsWith("/processar-inlabs") || 
+        endpoint.startsWith("/teste-fallback")) {
+      
       fd.append("sections", sections);
       
       if (keywords) {
@@ -48,7 +52,9 @@ document.addEventListener("DOMContentLoaded", function() {
         }
       }
       
-      if(endpoint.includes("-ia")) {
+      if(endpoint.includes("fallback")) {
+         loadingText = "Testando busca no DOU Público (in.gov.br)... isso pode levar até 1 min.";
+      } else if(endpoint.includes("-ia")) {
         loadingText = "Processando DOU com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
       } else {
         loadingText = "Processando DOU (Rápido) no INLABS, aguarde…";
@@ -63,7 +69,8 @@ document.addEventListener("DOMContentLoaded", function() {
 
     if (btnProcessar) btnProcessar.disabled = true;
     if (btnProcessarIA) btnProcessarIA.disabled = true;
-    if (btnProcessarValor) btnProcessarValor.disabled = true; // [NOVO]
+    if (btnProcessarValor) btnProcessarValor.disabled = true;
+    if (btnTesteFallback) btnTesteFallback.disabled = true; // [NOVO]
     if (btnCopiar) btnCopiar.disabled = true;
 
     if (preview) {
@@ -95,7 +102,8 @@ document.addEventListener("DOMContentLoaded", function() {
       
       if (btnProcessar) btnProcessar.disabled = false;
       if (btnProcessarIA) btnProcessarIA.disabled = false;
-      if (btnProcessarValor) btnProcessarValor.disabled = false; // [NOVO]
+      if (btnProcessarValor) btnProcessarValor.disabled = false;
+      if (btnTesteFallback) btnTesteFallback.disabled = false; // [NOVO]
       if (preview) preview.classList.remove("loading");
     }
   }
@@ -105,12 +113,14 @@ document.addEventListener("DOMContentLoaded", function() {
     btnProcessar.addEventListener("click", () => handleProcessing("/processar-inlabs"));
   }
   if (btnProcessarIA) {
-    // [MODIFICADO] Endpoint renomeado
     btnProcessarIA.addEventListener("click", () => handleProcessing("/processar-dou-ia"));
   }
   if (btnProcessarValor) {
-    // [NOVO]
     btnProcessarValor.addEventListener("click", () => handleProcessing("/processar-valor-ia"));
+  }
+  // [NOVO LISTENER]
+  if (btnTesteFallback) {
+    btnTesteFallback.addEventListener("click", () => handleProcessing("/teste-fallback"));
   }
 
   // Botão Copiar
