@@ -19,7 +19,7 @@ except ImportError:
 # --- CONFIGURAÇÃO ---
 STATE_FILE_PATH = os.environ.get("LEG_STATE_FILE_PATH", "/dados/legislativo_state.json")
 
-# Palavras-chave Estratégicas da Marinha
+# Palavras-chave Estratégicas da Marinha (ATUALIZADO)
 KEYWORDS = [
     "Marinha do Brasil", 
     "Forças Armadas", 
@@ -46,7 +46,13 @@ KEYWORDS = [
     "Pensões Militares",
     "Soberania Nacional",
     "Almirantado",
-    "Corpo de Fuzileiros Navais"
+    "Corpo de Fuzileiros Navais",
+    # --- NOVOS TERMOS ORÇAMENTÁRIOS E PLN ---
+    "PLN",
+    "Orçamento Fiscal",
+    "Crédito Especial",
+    "Crédito Suplementar",
+    "Crédito Extraordinário"
 ]
 
 URL_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
