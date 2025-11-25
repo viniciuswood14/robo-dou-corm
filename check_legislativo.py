@@ -1,5 +1,5 @@
 # Nome do arquivo: check_legislativo.py
-# Versão: 7.0 (Debug Mode + Browser Headers)
+# Versão: 8.0 (Diagnóstico de Estrutura JSON + Teste PLN 32)
 
 import os
 import json
@@ -8,7 +8,7 @@ import httpx
 from datetime import datetime, timedelta
 from typing import List, Set, Dict
 
-# Importação do Telegram (Mock se falhar)
+# Mock do Telegram se falhar import
 try:
     from telegram import send_telegram_message
 except ImportError:
@@ -18,8 +18,6 @@ except ImportError:
 # --- CONFIGURAÇÃO ---
 STATE_FILE_PATH = os.environ.get("LEG_STATE_FILE_PATH", "/dados/legislativo_state.json")
 
-# KEYWORDS (Minúsculo para match insensível a case)
-# Adicionamos termos específicos de orçamento para garantir o PLN
 KEYWORDS = [
     "marinha", "forças armadas", "defesa", "submarino", "nuclear", 
     "amazônia azul", "prosub", "tamandaré", "fundo naval", 
@@ -29,50 +27,37 @@ KEYWORDS = [
     "aeronáutica", "exército"
 ]
 
-# Siglas para varrer no Senado
-SENADO_SIGLAS = ["PLN", "PL", "PEC", "PDL", "PLP"]
+# Adicionei PLN no início para prioridade
+SENADO_SIGLAS = ["PLN", "PL", "PEC", "PDL"]
 
 URL_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 URL_SENADO = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista"
 
 def load_state() -> Set[str]:
-    if not os.path.exists(STATE_FILE_PATH):
-        return set()
+    if not os.path.exists(STATE_FILE_PATH): return set()
     try:
-        with open(STATE_FILE_PATH, 'r', encoding='utf-8') as f:
-            return set(json.load(f))
-    except:
-        return set()
+        with open(STATE_FILE_PATH, 'r', encoding='utf-8') as f: return set(json.load(f))
+    except: return set()
 
 def save_state(processed_ids: Set[str]):
     try:
         dirname = os.path.dirname(STATE_FILE_PATH)
-        if dirname and not os.path.exists(dirname):
-            os.makedirs(dirname, exist_ok=True)
-        with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(list(processed_ids), f)
-    except Exception as e:
-        print(f"Erro ao salvar estado legislativo: {e}")
+        if dirname and not os.path.exists(dirname): os.makedirs(dirname, exist_ok=True)
+        with open(STATE_FILE_PATH, 'w', encoding='utf-8') as f: json.dump(list(processed_ids), f)
+    except Exception as e: print(f"Erro state: {e}")
 
-# --- CONSULTA CÂMARA (Mantida, pois funciona) ---
+# --- CONSULTA CÂMARA ---
 async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[Dict]:
     print(f">>> [API Câmara] Consultando...")
     results = []
-    # Headers de navegador para evitar bloqueio
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36", "Accept": "application/json"}
     
     for kw in KEYWORDS:
         if len(kw) < 4 and kw != "pln": continue 
-        
-        params = {"dataInicio": start_date_iso, "ordem": "DESC", "ordenarPor": "id", "keywords": kw, "itens": 15}
         try:
-            resp = await client.get(URL_CAMARA, params=params, headers=headers, timeout=10)
+            resp = await client.get(URL_CAMARA, params={"dataInicio": start_date_iso, "ordem": "DESC", "ordenarPor": "id", "keywords": kw, "itens": 10}, headers=headers, timeout=10)
             if resp.status_code == 200:
-                dados = resp.json().get("dados", [])
-                for item in dados:
+                for item in resp.json().get("dados", []):
                     results.append({
                         "uid": f"CAM_{item['id']}", "casa": "Câmara",
                         "tipo": item['siglaTipo'], "numero": str(item['numero']),
@@ -80,83 +65,76 @@ async def check_camara(client: httpx.AsyncClient, start_date_iso: str) -> List[D
                         "link": f"https://www.camara.leg.br/propostas-legislativas/{item['id']}",
                         "keyword": kw
                     })
-        except Exception as e:
-            print(f"Erro API Câmara ({kw}): {e}")
-            
+        except: pass
     return results
 
-# --- CONSULTA SENADO (MODO DIAGNÓSTICO) ---
+# --- CONSULTA SENADO (DEBUG MODE) ---
 async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Dict]:
-    print(f">>> [API Senado] Iniciando varredura PROFUNDA (2025)...")
+    print(f">>> [API Senado] Iniciando varredura (v8 Debug)...")
     results = []
-    
-    # Headers simulam navegador real (CRÍTICO para o Senado)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
-    
-    # Data limite calculada no Python (não enviada para API para evitar erro de filtro lá)
-    limit_date = datetime.now() - timedelta(days=days_back_int + 1) # +1 margem
+    headers = {"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36", "Accept": "application/json"}
     ano_atual = datetime.now().year 
+    
+    # 1. TESTE DE CONEXÃO ESPECÍFICO (PLN 32/2025)
+    # Isso verifica se o problema é a lista geral ou a conexão
+    try:
+        print(f"   -> Testando acesso direto ao PLN 32/2025...")
+        url_test = f"{URL_SENADO}?sigla=PLN&numero=32&ano=2025"
+        resp_test = await client.get(url_test, headers=headers, timeout=15)
+        if resp_test.status_code == 200:
+            d_test = resp_test.json()
+            # Verifica se retornou algo na busca direta
+            mats = d_test.get("PesquisaBasicaMateria", {}).get("Materias", {}).get("Materia", [])
+            if mats:
+                print(f"   -> [SUCESSO] PLN 32/2025 acessível via busca direta!")
+            else:
+                print(f"   -> [ALERTA] Busca direta PLN 32 retornou 200 OK mas lista vazia. JSON Raw keys: {d_test.keys()}")
+        else:
+            print(f"   -> [ERRO] Falha no teste PLN 32: HTTP {resp_test.status_code}")
+    except Exception as e:
+        print(f"   -> [ERRO CRÍTICO] Exceção no teste direto: {e}")
 
+    # 2. VARREDURA GERAL
     for sigla in SENADO_SIGLAS:
-        # Busca TUDO do ano para esta sigla
         url = f"{URL_SENADO}?sigla={sigla}&ano={ano_atual}"
-        
         try:
-            # Timeout maior pois a lista pode ser grande
             resp = await client.get(url, headers=headers, timeout=30)
-            
-            # [DEBUG] Imprime status para sabermos se conectou
-            # print(f"[DEBUG SENADO] {sigla}: HTTP {resp.status_code}")
+            print(f"   -> [{sigla}] HTTP {resp.status_code}")
 
             if resp.status_code == 200:
                 data = resp.json()
                 
-                # Tratamento de erros na estrutura JSON do Senado
+                # DEBUG DA ESTRUTURA
                 pesquisa = data.get("PesquisaBasicaMateria")
-                if not pesquisa: continue # JSON vazio ou erro
+                if not pesquisa:
+                    print(f"      [AVISO] 'PesquisaBasicaMateria' não encontrada. Chaves raiz: {list(data.keys())}")
+                    continue
                 
                 container = pesquisa.get("Materias")
-                if not container: continue # Sem matérias no ano (raro)
+                if not container:
+                    print(f"      [AVISO] 'Materias' não encontrada dentro de PesquisaBasicaMateria.")
+                    continue
                 
                 lista = container.get("Materia", [])
-                # Se só tiver 1 item, a API retorna Dict, não List. Normalizamos:
                 if isinstance(lista, dict): lista = [lista]
                 
-                # print(f"[DEBUG SENADO] {sigla}: Encontradas {len(lista)} matérias no total. Filtrando...")
+                print(f"      -> Recebidos {len(lista)} itens de {sigla}. Filtrando...")
 
+                count_found = 0
                 for mat in lista:
                     dados = mat.get("DadosBasicosMateria", {})
-                    
-                    # 1. Filtro de Data (Local)
-                    data_str = dados.get("DataApresentacao") # Ex: 2025-11-24
-                    if not data_str: continue
-                    
-                    try:
-                        dt_obj = datetime.strptime(str(data_str)[:10], "%Y-%m-%d")
-                        # Se for mais antigo que o limite, ignora
-                        if dt_obj < limit_date:
-                            continue 
-                    except: continue
-
-                    # 2. Filtro de Texto (Ementa)
                     ementa = dados.get("EmentaMateria", "")
-                    explicacao = dados.get("ExplicacaoEmentaMateria", "")
-                    natureza = dados.get("NaturezaMateria", "") # Ex: "Crédito"
+                    texto_completo = (ementa + " " + dados.get("NaturezaMateria", "")).lower()
                     
-                    full_text = (ementa + " " + explicacao + " " + natureza).lower()
-                    
-                    # Match das palavras-chave
+                    # Verifica Keywords
                     found_kw = None
                     for kw in KEYWORDS:
-                        if kw.lower() in full_text:
+                        if kw.lower() in texto_completo:
                             found_kw = kw
                             break
                     
                     if found_kw:
-                        print(f"   -> [ACHOU!] {sigla} {dados.get('NumeroMateria')} - {found_kw}")
+                        count_found += 1
                         results.append({
                             "uid": f"SEN_{dados.get('CodigoMateria')}",
                             "casa": "Senado",
@@ -167,41 +145,37 @@ async def check_senado(client: httpx.AsyncClient, days_back_int: int) -> List[Di
                             "link": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{dados.get('CodigoMateria')}",
                             "keyword": found_kw.upper()
                         })
+                print(f"      -> Filtrados: {count_found} relevantes.")
             
             elif resp.status_code == 403:
-                print(f"⚠️ ERRO 403: Senado bloqueou o robô. Tentando header alternativo na próxima.")
-            else:
-                print(f"⚠️ ERRO SENADO {sigla}: {resp.status_code} - {resp.text[:100]}")
-
-            await asyncio.sleep(0.5)
+                print(f"⚠️ ERRO 403 (Bloqueio) para {sigla}")
+            
+            await asyncio.sleep(1)
             
         except Exception as e:
-            print(f"Erro Crítico API Senado ({sigla}): {e}")
+            print(f"Erro API Senado ({sigla}): {e}")
 
     return results
 
-# --- FUNÇÃO PRINCIPAL ---
+# --- MAIN LOOP ---
 async def check_and_process_legislativo(only_new: bool = True, days_back: int = 5) -> List[Dict]:
-    print(f"--- Iniciando Robô Legislativo v7 (Headers Browser) ---")
+    print(f"--- Iniciando Robô Legislativo v8 (Debug) ---")
     processed_ids = load_state()
     start_date_iso = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     
-    all_proposals = []
     new_for_telegram = []
+    all_proposals = []
     
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        # Senado primeiro para testar o fix
         res_senado = await check_senado(client, days_back)
         res_camara = await check_camara(client, start_date_iso)
         
-        full_list = res_senado + res_camara
+        full = res_senado + res_camara
         seen = set()
-        
-        for p in full_list:
+        for p in full:
             if p['uid'] in seen: continue
             seen.add(p['uid'])
             all_proposals.append(p)
-            
             if p['uid'] not in processed_ids:
                 new_for_telegram.append(p)
                 processed_ids.add(p['uid'])
@@ -209,27 +183,13 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
     save_state(processed_ids)
 
     if only_new:
-        if not new_for_telegram:
-            return []
-        
-        # Monta mensagem
+        if not new_for_telegram: return []
         msg = [f"🏛️ *Monitoramento Legislativo - Novidades*"]
         for p in new_for_telegram:
-            icon = "🟢" if p['casa'] == "Câmara" else "🔵"
-            # Ementa limpa
-            ementa_clean = (p['ementa'] or "Sem descrição").replace("\n", " ").strip()[:280]
-            if len(ementa_clean) == 280: ementa_clean += "..."
-
-            msg.append(f"\n{icon} *{p['casa']}* | {p['tipo']} {p['numero']}/{p['ano']}")
-            msg.append(f"🔎 _Match: {p['keyword']}_")
-            msg.append(f"📝 {ementa_clean}")
-            msg.append(f"🔗 [Link Oficial]({p['link']})")
-            msg.append("⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯")
-
-        final_text = "\n".join(msg)
-        if len(final_text) > 4000: final_text = final_text[:4000] + "\n(cortado)"
-        
-        await send_telegram_message(final_text)
+            ementa = (p['ementa'] or "")[:200]
+            msg.append(f"\n{p['casa']} | {p['tipo']} {p['numero']}/{p['ano']}\n🔎 {p['keyword']}\n📝 {ementa}\n🔗 [Link]({p['link']})")
+            msg.append("---")
+        await send_telegram_message("\n".join(msg))
         return new_for_telegram
 
     return all_proposals
