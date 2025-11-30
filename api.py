@@ -1482,28 +1482,6 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
 
 # [NOVO ENDPOINT - INÍCIO]
 # Este endpoint deve vir ANTES do endpoint /{ano} para evitar o conflito "integer parsing"
-@app.get("/api/pac-data/historical-dotacao", summary="Busca dados históricos de dotação (2010-2025) para o gráfico")
-async def get_pac_historical_data():
-    """
-    Endpoint para o gráfico principal do dashboard PAC.
-    Lê o arquivo JSON pré-compilado pelo robô (check_pac.py).
-    """
-    try:
-        with open(HISTORICAL_CACHE_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data
-    except FileNotFoundError:
-        # Retorna uma estrutura vazia válida se o arquivo ainda não existir
-        return {"labels": [], "datasets": []}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao ler o arquivo de cache: {e}"
-        )
-# [NOVO ENDPOINT - FIM]
-
-
-# Endpoint genérico para ano específico (DEVE vir DEPOIS do historical-dotacao)
 @app.get("/api/pac-data/{ano}", summary="Busca dados de execução do PAC por ano")
 async def get_pac_data(
     ano: int = Path(..., description="Ano do exercício (ex: 2010)", ge=2010, le=2025)
@@ -1512,13 +1490,18 @@ async def get_pac_data(
     Endpoint para o frontend do dashboard PAC.
     """
     
-    tasks = []
+    # --- CORREÇÃO: Inicializa a lista de tarefas ---
+    tasks = [] 
     for programa, acoes in PROGRAMAS_ACOES_PAC.items():
         for acao_cod in acoes.keys():
+            # Adiciona a busca à lista de tarefas
             tasks.append(buscar_dados_acao_pac(ano, acao_cod))
 
+    # Executa todas as buscas em paralelo
+    # (Agora 'tasks' existe, então o erro 500 vai sumir)
     resultados_brutos = await asyncio.gather(*tasks)
     
+    # Filtra resultados que falharam (None)
     dados_brutos = [r for r in resultados_brutos if r is not None]
     
     if not dados_brutos:
@@ -1526,7 +1509,7 @@ async def get_pac_data(
 
     tabela_final = []
     
-    # Inicializa totais incluindo a nova coluna DISPONÍVEL
+   # Inicializa totais incluindo a nova coluna DISPONÍVEL
     total_geral = {
         'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0,
         'EMPENHADO (c)': 0.0, 'LIQUIDADO': 0.0, 'PAGO': 0.0
@@ -1534,8 +1517,8 @@ async def get_pac_data(
 
     for programa, acoes in PROGRAMAS_ACOES_PAC.items():
         soma_programa = {
-            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0,
-            'EMPENHADO (c)': 0.0, 'LIQUIDADO': 0.0, 'PAGO': 0.0
+            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0, 'EMPENHADO (c)': 0.0,
+            'LIQUIDADO': 0.0, 'PAGO': 0.0
         }
         
         linhas_acao_programa = []
@@ -1553,7 +1536,7 @@ async def get_pac_data(
             liquidado = get_val('liquidado')
             pago = get_val('pago')
             
-            # Tenta pegar o disponível (se o nome estiver certo lá em cima)
+            # Tenta pegar o disponível (se o nome estiver certo na função anterior)
             disponivel = get_val('dotacao_disponivel')
 
             linhas_acao_programa.append({
@@ -1567,6 +1550,7 @@ async def get_pac_data(
                 'PAGO': pago
             })
             
+            # Acumula totais do programa
             soma_programa['LOA'] += loa
             soma_programa['DOTAÇÃO ATUAL'] += dot_atual
             soma_programa['DISPONÍVEL'] += disponivel
@@ -1574,6 +1558,7 @@ async def get_pac_data(
             soma_programa['LIQUIDADO'] += liquidado
             soma_programa['PAGO'] += pago
 
+        # Adiciona a linha de total do programa
         tabela_final.append({
             'PROGRAMA': programa,
             'AÇÃO': None,
@@ -1582,6 +1567,7 @@ async def get_pac_data(
         
         tabela_final.extend(linhas_acao_programa)
         
+        # Acumula totais gerais
         total_geral['LOA'] += soma_programa['LOA']
         total_geral['DOTAÇÃO ATUAL'] += soma_programa['DOTAÇÃO ATUAL']
         total_geral['DISPONÍVEL'] += soma_programa['DISPONÍVEL']
@@ -1596,7 +1582,6 @@ async def get_pac_data(
     })
 
     return tabela_final
-
 
 # [NOVO ENDPOINT MANUAL]
 @app.post("/api/admin/force-update-pac")
