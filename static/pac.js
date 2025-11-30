@@ -13,7 +13,7 @@ document.addEventListener("DOMContentLoaded", function() {
   const errorText = el("error-text");
   const chartCanvas = el("pacChart");
 
-  let pacChart = null; // Variável global para o gráfico
+  let pacChart = null; 
 
   // Define o ano padrão para o ano atual
   (function initYear() {
@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", function() {
   }
 
   function formatPercent(value) {
-    if (typeof value !== 'number') return "0,0%";
+    if (typeof value !== 'number' || isNaN(value)) return "0,0%";
     return (value * 100).toLocaleString('pt-BR', {
       minimumFractionDigits: 1,
       maximumFractionDigits: 1
@@ -48,7 +48,6 @@ document.addEventListener("DOMContentLoaded", function() {
       return;
     }
     
-    // Atualiza o input para refletir o ano clicado
     inputAno.value = ano;
 
     btnConsultar.disabled = true;
@@ -69,13 +68,16 @@ document.addEventListener("DOMContentLoaded", function() {
       tableHeader.innerHTML = "";
       tableBody.innerHTML = "";
 
-      // 2. Define os cabeçalhos (baseado nas chaves do JSON)
-      const headers = [
+      // 2. Define os cabeçalhos
+      // A última coluna foi renomeada para refletir a nova fórmula
+      const headersDisplay = [
         'PROGRAMA', 'AÇÃO', 'LOA', 'DOTAÇÃO ATUAL', 
-        'EMPENHADO (c)', 'LIQUIDADO', 'PAGO', '% EMP/DOT'
+        'DISPONÍVEL',  
+        'EMPENHADO (c)', 'LIQUIDADO', 'PAGO', 
+        'IND. (E-D)/E'
       ];
       
-      headers.forEach(headerText => {
+      headersDisplay.forEach(headerText => {
         const th = document.createElement("th");
         th.textContent = headerText;
         if (headerText !== 'PROGRAMA' && headerText !== 'AÇÃO') {
@@ -92,16 +94,49 @@ document.addEventListener("DOMContentLoaded", function() {
         else if (rowData.AÇÃO === null) tr.classList.add("row-programa");
         else tr.classList.add("row-acao");
 
-        headers.forEach(header => {
-            const td = document.createElement("td");
-            let value = rowData[header];
+        // Valores vindos da API
+        const dotacao = rowData['DOTAÇÃO ATUAL'] || 0;
+        const empenhado = rowData['EMPENHADO (c)'] || 0;
+        // Agora lemos o disponível direto da API, sem cálculo local
+        const disponivel = rowData['DISPONÍVEL'] || 0; 
 
-            if (header === 'PROGRAMA' || header === 'AÇÃO') {
+        // Cálculo da métrica solicitada: (Empenhado - Disponível) / Empenhado
+        let novoIndicador = 0;
+        if (empenhado !== 0) {
+            novoIndicador = (empenhado - disponivel) / empenhado;
+        }
+
+        // Monta o array na ordem das colunas
+        const valoresOrdenados = [
+            rowData['PROGRAMA'],
+            rowData['AÇÃO'],
+            rowData['LOA'],
+            dotacao,
+            disponivel, // Valor do SIOP
+            empenhado,
+            rowData['LIQUIDADO'],
+            rowData['PAGO'],
+            novoIndicador // Valor calculado
+        ];
+
+        valoresOrdenados.forEach((value, index) => {
+            const td = document.createElement("td");
+            const headerName = headersDisplay[index];
+
+            if (headerName === 'PROGRAMA' || headerName === 'AÇÃO') {
                 td.textContent = value || "";
-            } else if (header === '% EMP/DOT') {
+            } 
+            else if (headerName === 'IND. (E-D)/E') {
                 td.textContent = formatPercent(value);
                 td.classList.add("num");
-            } else {
+                
+                // Destaque visual se negativo (opcional)
+                if (value < 0) {
+                    td.style.color = "#d9534f"; // Vermelho suave
+                    td.style.fontWeight = "bold";
+                }
+            } 
+            else {
                 td.textContent = formatCurrency(value);
                 td.classList.add("num");
             }
@@ -111,7 +146,7 @@ document.addEventListener("DOMContentLoaded", function() {
         tableBody.appendChild(tr);
       });
 
-      tableContainer.style.display = "block"; // Exibe a tabela
+      tableContainer.style.display = "block"; 
 
     } catch (err) {
       errorText.textContent = `Erro ao consultar ${ano}: ${err.message}`;
@@ -122,7 +157,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
   }
 
-  // --- Função do Gráfico ---
+  // --- Função do Gráfico (Mantida igual) ---
   async function fetchAndRenderChart() {
     loadingText.textContent = "Carregando gráfico histórico (2010-2025)...";
     loadingText.style.display = "block";
@@ -131,20 +166,11 @@ document.addEventListener("DOMContentLoaded", function() {
     
     try {
       const response = await fetch(`${API_BASE}/api/pac-data/historical-dotacao`);
-      const chartData = await response.json(); // Pega o JSON {labels: [], datasets: []}
+      const chartData = await response.json(); 
 
-      if (!response.ok) {
-        throw new Error(chartData.detail || `Erro HTTP ${response.status}`);
-      }
+      if (!response.ok) throw new Error(chartData.detail || `Erro HTTP ${response.status}`);
 
-      // Prepara cores para os 5 datasets
-      const colors = [
-          'rgba(0, 44, 95, 0.8)',  // Azul Marinho
-          'rgba(0, 95, 86, 0.8)',  // Verde Marinho
-          'rgba(255, 184, 28, 0.8)', // Amarelo Ouro
-          'rgba(60, 120, 216, 0.8)', // Azul Claro
-          'rgba(217, 83, 79, 0.8)'   // Vermelho (para destaque, se necessário)
-      ];
+      const colors = ['rgba(0, 44, 95, 0.8)', 'rgba(0, 95, 86, 0.8)', 'rgba(255, 184, 28, 0.8)', 'rgba(60, 120, 216, 0.8)', 'rgba(217, 83, 79, 0.8)'];
       
       chartData.datasets.forEach((dataset, index) => {
           dataset.backgroundColor = colors[index % colors.length];
@@ -158,82 +184,49 @@ document.addEventListener("DOMContentLoaded", function() {
           responsive: true,
           maintainAspectRatio: false,
           plugins: {
-            title: {
-                display: true,
-                text: 'Dotação Autorizada (LOA + Créditos) por Ação e Ano',
-                font: { size: 16, weight: '600' },
-                color: '#002c5f'
-            },
-            legend: {
-                position: 'top',
-            },
+            title: { display: true, text: 'Dotação Autorizada (LOA + Créditos) por Ação e Ano', font: { size: 16, weight: '600' }, color: '#002c5f' },
+            legend: { position: 'top' },
             tooltip: {
                 callbacks: {
                     label: function(context) {
                         let label = context.dataset.label || '';
-                        if (label) {
-                            label += ': ';
-                        }
-                        if (context.parsed.y !== null) {
-                            label += formatCurrency(context.parsed.y);
-                        }
+                        if (label) label += ': ';
+                        if (context.parsed.y !== null) label += formatCurrency(context.parsed.y);
                         return label;
                     }
                 }
             }
           },
           scales: {
-            x: {
-              stacked: true, // Empilha as ações dentro do ano
-              title: { display: true, text: 'Exercício (Ano)' }
-            },
-            y: {
-              stacked: true, // Empilha as ações dentro do ano
-              title: { display: true, text: 'Dotação (R$)' },
-              ticks: {
-                callback: function(value) { return formatCurrency(value); }
-              }
-            }
+            x: { stacked: true, title: { display: true, text: 'Exercício (Ano)' } },
+            y: { stacked: true, title: { display: true, text: 'Dotação (R$)' }, ticks: { callback: function(value) { return formatCurrency(value); } } }
           },
-          // [AÇÃO PRINCIPAL] Lidar com o clique no gráfico
           onClick: (e) => {
             const activePoints = pacChart.getElementsAtEventForMode(e, 'index', { intersect: true }, true);
             if (activePoints.length > 0) {
                 const clickedIndex = activePoints[0].index;
                 const clickedYear = chartData.labels[clickedIndex];
-                
-                // Chama a função que busca a tabela detalhada!
                 fetchAndRenderTable(clickedYear);
             }
           }
         }
       });
       
-      // Carrega a tabela do ano mais recente por padrão
       const ultimoAno = chartData.labels[chartData.labels.length - 1];
       fetchAndRenderTable(ultimoAno);
 
     } catch (err) {
-        // Se falhar (ex: arquivo ainda não existe), mostra erro amigável
         if (err.message.includes("404")) {
-             errorText.textContent = "O robô ainda está compilando os dados históricos. Por favor, aguarde a execução das 05h35 ou consulte a tabela manualmente abaixo.";
+             errorText.textContent = "O robô ainda está compilando os dados históricos. Aguarde ou consulte a tabela abaixo.";
         } else {
              errorText.textContent = `Erro ao carregar o gráfico: ${err.message}`;
         }
         errorText.style.display = "block";
         loadingText.style.display = "none";
-        
-        // Se o gráfico falhar, tenta carregar pelo menos a tabela do ano atual
-        const currentYear = new Date().getFullYear();
-        fetchAndRenderTable(currentYear);
+        fetchAndRenderTable(new Date().getFullYear());
     }
   }
 
-  // --- Listeners ---
-  
-  // O botão agora consulta o ano que está no input
   btnConsultar.addEventListener("click", () => fetchAndRenderTable(inputAno.value));
-  
-  // Carrega o gráfico (que então carregará a tabela) ao iniciar
   fetchAndRenderChart();
 });
