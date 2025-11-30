@@ -1421,12 +1421,16 @@ PROGRAMAS_ACOES_PAC = {
     }
 }
 
+# No arquivo api.py, substitua as funções buscar_dados_acao_pac e get_pac_data
+
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     """
     Busca os dados de UMA ação, totalizados.
+    Versão Debug: Imprime colunas disponíveis para encontrar o campo correto.
     """
     print(f"[PAC API] Buscando dados para {ano}, Ação {acao_cod}...")
     try:
+        # Roda a função síncrona 'despesa_detalhada' em um thread
         df_detalhado = await asyncio.to_thread(
             despesa_detalhada,
             exercicio=ano,
@@ -1437,18 +1441,38 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
         
         if df_detalhado.empty:
             return None
+
+        # --- [DEBUG CRÍTICO] ---
+        # Isso vai imprimir no console do servidor quais colunas vieram do SIOP
+        # Procure por algo como 'saldo', 'disponivel', 'dotacao_saldo'
+        print(f"--- [DEBUG COLUNAS] Ação {acao_cod}: {list(df_detalhado.columns)}")
+        # -----------------------
             
-        # --- [ALTERAÇÃO AQUI] Adicionado 'dotacao_disponivel' ---
-        colunas_numericas = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel']
-        colunas_para_somar = [col for col in colunas_numericas if col in df_detalhado.columns]
+        # Lista de tentativas de nome para o Disponível (Adicione outros se souber)
+        cols_possiveis = [
+            'loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago',
+            'dotacao_disponivel', 'saldo_disponivel', 'saldo_dotacao' 
+        ]
+        
+        # Filtra apenas as colunas que REALMENTE existem no DataFrame retornado
+        colunas_para_somar = [col for col in cols_possiveis if col in df_detalhado.columns]
         
         if not colunas_para_somar:
             return None
             
         totais_acao = df_detalhado[colunas_para_somar].sum()
         
+        # Adiciona o código da Ação para referência
         dados_finais = totais_acao.to_dict()
         dados_finais['Acao_cod'] = acao_cod
+        
+        # Garante que as chaves existam mesmo se a coluna não vier (evita erro no loop seguinte)
+        # Se 'dotacao_disponivel' não existir, tenta achar um saldo
+        if 'dotacao_disponivel' not in dados_finais:
+             # Tenta achar algum campo de saldo capturado
+             saldo = dados_finais.get('saldo_disponivel') or dados_finais.get('saldo_dotacao') or 0.0
+             dados_finais['dotacao_disponivel'] = saldo
+
         return dados_finais
 
     except Exception as e:
@@ -1484,27 +1508,34 @@ async def get_pac_historical_data():
 async def get_pac_data(
     ano: int = Path(..., description="Ano do exercício (ex: 2010)", ge=2010, le=2025)
 ):
-    # ... (código anterior de tasks e gather) ...
+    """
+    Endpoint para o frontend do dashboard PAC.
+    """
     
-    # Executa todas as buscas
+    tasks = []
+    for programa, acoes in PROGRAMAS_ACOES_PAC.items():
+        for acao_cod in acoes.keys():
+            tasks.append(buscar_dados_acao_pac(ano, acao_cod))
+
     resultados_brutos = await asyncio.gather(*tasks)
+    
     dados_brutos = [r for r in resultados_brutos if r is not None]
     
     if not dados_brutos:
          return []
 
-    # --- Monta a Tabela JSON para o Frontend ---
     tabela_final = []
-    # Adicione 'DISPONÍVEL': 0.0 nos totais
+    
+    # Inicializa totais incluindo a nova coluna DISPONÍVEL
     total_geral = {
-        'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0, 'EMPENHADO (c)': 0.0,
-        'LIQUIDADO': 0.0, 'PAGO': 0.0
+        'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0,
+        'EMPENHADO (c)': 0.0, 'LIQUIDADO': 0.0, 'PAGO': 0.0
     }
 
     for programa, acoes in PROGRAMAS_ACOES_PAC.items():
         soma_programa = {
-            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0, 'EMPENHADO (c)': 0.0,
-            'LIQUIDADO': 0.0, 'PAGO': 0.0
+            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0,
+            'EMPENHADO (c)': 0.0, 'LIQUIDADO': 0.0, 'PAGO': 0.0
         }
         
         linhas_acao_programa = []
@@ -1512,30 +1543,30 @@ async def get_pac_data(
         for acao_cod, acao_desc in acoes.items():
             row_data = next((d for d in dados_brutos if d.get('Acao_cod') == acao_cod), None)
             
-            loa = row_data.get('loa', 0.0) if row_data else 0.0
-            dot_atual = row_data.get('loa_mais_credito', 0.0) if row_data else 0.0
-            empenhado = row_data.get('empenhado', 0.0) if row_data else 0.0
-            liquidado = row_data.get('liquidado', 0.0) if row_data else 0.0
-            pago = row_data.get('pago', 0.0) if row_data else 0.0
-            
-            # --- [ALTERAÇÃO AQUI] Busca o campo do SIOP ---
-            disponivel = row_data.get('dotacao_disponivel', 0.0) if row_data else 0.0
+            # Helper seguro para pegar float
+            def get_val(key):
+                return float(row_data.get(key, 0.0)) if row_data else 0.0
 
-            # Adiciona na linha da ação
+            loa = get_val('loa')
+            dot_atual = get_val('loa_mais_credito')
+            empenhado = get_val('empenhado')
+            liquidado = get_val('liquidado')
+            pago = get_val('pago')
+            
+            # Tenta pegar o disponível (se o nome estiver certo lá em cima)
+            disponivel = get_val('dotacao_disponivel')
+
             linhas_acao_programa.append({
                 'PROGRAMA': None,
                 'AÇÃO': f"{acao_cod} - {acao_desc.upper()}",
                 'LOA': loa,
                 'DOTAÇÃO ATUAL': dot_atual,
-                'DISPONÍVEL': disponivel, # Adicionado
+                'DISPONÍVEL': disponivel,
                 'EMPENHADO (c)': empenhado,
                 'LIQUIDADO': liquidado,
                 'PAGO': pago
-                # O cálculo do % ou Indice deixamos para o Frontend ou fazemos aqui. 
-                # Como o sr pediu cálculo específico, o front já vai tratar.
             })
             
-            # Acumula no total do programa
             soma_programa['LOA'] += loa
             soma_programa['DOTAÇÃO ATUAL'] += dot_atual
             soma_programa['DISPONÍVEL'] += disponivel
@@ -1543,7 +1574,6 @@ async def get_pac_data(
             soma_programa['LIQUIDADO'] += liquidado
             soma_programa['PAGO'] += pago
 
-        # Adiciona a linha de total do programa
         tabela_final.append({
             'PROGRAMA': programa,
             'AÇÃO': None,
@@ -1552,7 +1582,6 @@ async def get_pac_data(
         
         tabela_final.extend(linhas_acao_programa)
         
-        # Acumula no total geral
         total_geral['LOA'] += soma_programa['LOA']
         total_geral['DOTAÇÃO ATUAL'] += soma_programa['DOTAÇÃO ATUAL']
         total_geral['DISPONÍVEL'] += soma_programa['DISPONÍVEL']
