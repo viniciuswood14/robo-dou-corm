@@ -1427,7 +1427,6 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
     """
     print(f"[PAC API] Buscando dados para {ano}, Ação {acao_cod}...")
     try:
-        # Roda a função síncrona 'despesa_detalhada' em um thread
         df_detalhado = await asyncio.to_thread(
             despesa_detalhada,
             exercicio=ano,
@@ -1439,7 +1438,8 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
         if df_detalhado.empty:
             return None
             
-        colunas_numericas = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago']
+        # --- [ALTERAÇÃO AQUI] Adicionado 'dotacao_disponivel' ---
+        colunas_numericas = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel']
         colunas_para_somar = [col for col in colunas_numericas if col in df_detalhado.columns]
         
         if not colunas_para_somar:
@@ -1447,14 +1447,13 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
             
         totais_acao = df_detalhado[colunas_para_somar].sum()
         
-        # Adiciona o código da Ação para referência
         dados_finais = totais_acao.to_dict()
         dados_finais['Acao_cod'] = acao_cod
         return dados_finais
 
     except Exception as e:
         print(f"Erro ao consultar o SIOP (PAC API) para a ação {acao_cod}: {e}")
-        return None # Retorna None em vez de lançar exceção para o gather
+        return None
 
 
 # [NOVO ENDPOINT - INÍCIO]
@@ -1485,47 +1484,32 @@ async def get_pac_historical_data():
 async def get_pac_data(
     ano: int = Path(..., description="Ano do exercício (ex: 2010)", ge=2010, le=2025)
 ):
-    """
-    Endpoint para o frontend do dashboard PAC.
-    Busca os dados de todas as ações e retorna a tabela formatada como JSON.
-    """
+    # ... (código anterior de tasks e gather) ...
     
-    # Cria uma lista de tarefas para buscar dados em paralelo
-    tasks = []
-    
-    for programa, acoes in PROGRAMAS_ACOES_PAC.items():
-        for acao_cod in acoes.keys():
-            tasks.append(buscar_dados_acao_pac(ano, acao_cod))
-
     # Executa todas as buscas
     resultados_brutos = await asyncio.gather(*tasks)
-    
-    # Filtra dados brutos (remove None se houver falhas)
     dados_brutos = [r for r in resultados_brutos if r is not None]
     
     if not dados_brutos:
-         # Retorna lista vazia em vez de 404 para não quebrar o front
          return []
 
     # --- Monta a Tabela JSON para o Frontend ---
     tabela_final = []
+    # Adicione 'DISPONÍVEL': 0.0 nos totais
     total_geral = {
-        'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'EMPENHADO (c)': 0.0,
+        'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0, 'EMPENHADO (c)': 0.0,
         'LIQUIDADO': 0.0, 'PAGO': 0.0
     }
 
     for programa, acoes in PROGRAMAS_ACOES_PAC.items():
-        # 1. Linha de Sumário do Programa
         soma_programa = {
-            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'EMPENHADO (c)': 0.0,
+            'LOA': 0.0, 'DOTAÇÃO ATUAL': 0.0, 'DISPONÍVEL': 0.0, 'EMPENHADO (c)': 0.0,
             'LIQUIDADO': 0.0, 'PAGO': 0.0
         }
         
         linhas_acao_programa = []
         
-        # 2. Linhas de Ação
         for acao_cod, acao_desc in acoes.items():
-            # Encontra o dado bruto correspondente
             row_data = next((d for d in dados_brutos if d.get('Acao_cod') == acao_cod), None)
             
             loa = row_data.get('loa', 0.0) if row_data else 0.0
@@ -1533,6 +1517,9 @@ async def get_pac_data(
             empenhado = row_data.get('empenhado', 0.0) if row_data else 0.0
             liquidado = row_data.get('liquidado', 0.0) if row_data else 0.0
             pago = row_data.get('pago', 0.0) if row_data else 0.0
+            
+            # --- [ALTERAÇÃO AQUI] Busca o campo do SIOP ---
+            disponivel = row_data.get('dotacao_disponivel', 0.0) if row_data else 0.0
 
             # Adiciona na linha da ação
             linhas_acao_programa.append({
@@ -1540,15 +1527,18 @@ async def get_pac_data(
                 'AÇÃO': f"{acao_cod} - {acao_desc.upper()}",
                 'LOA': loa,
                 'DOTAÇÃO ATUAL': dot_atual,
+                'DISPONÍVEL': disponivel, # Adicionado
                 'EMPENHADO (c)': empenhado,
                 'LIQUIDADO': liquidado,
-                'PAGO': pago,
-                '% EMP/DOT': (empenhado / dot_atual) if dot_atual else 0.0
+                'PAGO': pago
+                # O cálculo do % ou Indice deixamos para o Frontend ou fazemos aqui. 
+                # Como o sr pediu cálculo específico, o front já vai tratar.
             })
             
             # Acumula no total do programa
             soma_programa['LOA'] += loa
             soma_programa['DOTAÇÃO ATUAL'] += dot_atual
+            soma_programa['DISPONÍVEL'] += disponivel
             soma_programa['EMPENHADO (c)'] += empenhado
             soma_programa['LIQUIDADO'] += liquidado
             soma_programa['PAGO'] += pago
@@ -1557,26 +1547,23 @@ async def get_pac_data(
         tabela_final.append({
             'PROGRAMA': programa,
             'AÇÃO': None,
-            **soma_programa,
-            '% EMP/DOT': (soma_programa['EMPENHADO (c)'] / soma_programa['DOTAÇÃO ATUAL']) if soma_programa['DOTAÇÃO ATUAL'] else 0.0
+            **soma_programa
         })
         
-        # Adiciona as linhas de ação
         tabela_final.extend(linhas_acao_programa)
         
         # Acumula no total geral
         total_geral['LOA'] += soma_programa['LOA']
         total_geral['DOTAÇÃO ATUAL'] += soma_programa['DOTAÇÃO ATUAL']
+        total_geral['DISPONÍVEL'] += soma_programa['DISPONÍVEL']
         total_geral['EMPENHADO (c)'] += soma_programa['EMPENHADO (c)']
         total_geral['LIQUIDADO'] += soma_programa['LIQUIDADO']
         total_geral['PAGO'] += soma_programa['PAGO']
         
-    # 3. Linha de Total Geral
     tabela_final.append({
         'PROGRAMA': 'Total Geral',
         'AÇÃO': None,
-        **total_geral,
-        '% EMP/DOT': (total_geral['EMPENHADO (c)'] / total_geral['DOTAÇÃO ATUAL']) if total_geral['DOTAÇÃO ATUAL'] else 0.0
+        **total_geral
     })
 
     return tabela_final
