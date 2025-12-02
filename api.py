@@ -44,11 +44,10 @@ except ImportError:
     executar_fallback = None
 
 # --- [NOVO PARSER MPO] ---
-# Tenta importar o parser especializado para portarias
 try:
     import mb_portaria_parser
 except ImportError:
-    print("Aviso: 'mb_portaria_parser.py' não encontrado. Análise detalhada de portarias desativada.")
+    print("Aviso: 'mb_portaria_parser.py' não encontrado.")
     mb_portaria_parser = None
 
 # =====================================================================================
@@ -209,77 +208,49 @@ def norm(s: Optional[str]) -> str:
     return _ws.sub(" ", s).strip()
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    meses_pt = {
-        1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
-        5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
-        9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"
-    }
+    meses_pt = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"}
     try:
         dt = datetime.fromisoformat(when)
         dd = f"{dt.day:02d}{meses_pt.get(dt.month, '')}"
-    except Exception:
-        dd = when
+    except: dd = when
 
-    lines = []
-    lines.append("Bom dia, senhores!")
-    lines.append("")
-    lines.append(f"PTC as seguintes publicações de interesse no DOU de {dd}:")
-    lines.append("")
+    lines = [f"Bom dia, senhores!", "", f"PTC as seguintes publicações de interesse no DOU de {dd}:", ""]
 
     if not pubs:
         lines.append("— Sem ocorrências para os critérios informados —")
         return "\n".join(lines)
 
-    # Separa os "Destaques Analíticos" (MPO Parser)
-    mpo_pubs = [p for p in pubs if p.is_parsed_mpo]
-    other_pubs = [p for p in pubs if not p.is_parsed_mpo]
-
-    # --- 1. MPO ANALÍTICO (TOPO) ---
-    if mpo_pubs:
-        lines.append("⚓ *DESTAQUES ORÇAMENTÁRIOS (MPO)*")
-        lines.append("")
-        for p in mpo_pubs:
-            # O parser já retorna o texto formatado no 'relevance_reason'
-            lines.append(p.relevance_reason)
-            lines.append("")
-        lines.append("------------------------------------------")
-        lines.append("")
-
-    # --- 2. DEMAIS PUBLICAÇÕES (AGRUPADAS POR SEÇÃO) ---
-    pubs_by_section: Dict[str, List[Publicacao]] = {}
-    for p in other_pubs:
+    # Agrupa TUDO por seção (inclusive MPO)
+    pubs_by_section = {}
+    for p in pubs:
         sec = p.section or "DOU"
-        pubs_by_section.setdefault(sec, []).append(p)
+        # Cria chaves para ordenar: Seção 1 -> 2 -> 3
+        if "DO1" in sec or "Seção 1" in sec: sec_key = "1_DO1"
+        elif "DO2" in sec or "Seção 2" in sec: sec_key = "2_DO2"
+        elif "DO3" in sec or "Seção 3" in sec: sec_key = "3_DO3"
+        else: sec_key = "4_OUTROS"
+        
+        pubs_by_section.setdefault(sec_key, []).append(p)
 
-    for section_name in sorted(pubs_by_section.keys()):
-        subseq = pubs_by_section[section_name]
-        if not subseq:
-            continue
-
-        lines.append(f"🔰 {section_name.replace('DO', 'Seção ')}")
+    for sec_key in sorted(pubs_by_section.keys()):
+        label = "🔰 Seção 1" if "DO1" in sec_key else "🔰 Seção 2" if "DO2" in sec_key else "🔰 Seção 3" if "DO3" in sec_key else "🔰 Outros"
+        lines.append(label)
         lines.append("")
 
-        for p in subseq:
+        for p in pubs_by_section[sec_key]:
             lines.append(f"▶️ {p.organ or 'Órgão'}")
-            lines.append(f"📌 {p.type or 'Ato/Portaria'}")
+            lines.append(f"📌 {p.type or 'Ato'}")
+            
             if p.summary:
-                lines.append(p.summary)
-
+                lines.append(f"_{p.summary}_") 
+            
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
+            if "erro" in reason.lower() and "ia" in reason.lower(): prefix = "⚠️"
             
-            if (
-                reason.startswith("Erro na análise de IA:")
-                or reason.startswith("Erro GRAVE")
-                or reason.startswith("⚠️")
-            ):
-                prefix = "⚠️ Erro IA:"
-                reason = reason.replace("Erro na análise de IA:", "").strip()
-
-            if "\n" in reason:
-                lines.append(f"{prefix}\n{reason}")
-            else:
-                lines.append(f"{prefix} {reason}")
+            # Se for parser MPO, adiciona quebra de linha antes da tabela
+            if p.is_parsed_mpo: lines.append(f"{prefix}\n{reason}")
+            else: lines.append(f"{prefix} {reason}")
 
             lines.append("")
 
@@ -329,41 +300,34 @@ def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
 # INTEGRAÇÃO DO PARSER MPO (NOVA FUNÇÃO)
 # =====================================================================================
 def run_mpo_parser_on_zip(zip_bytes: bytes) -> List[Publicacao]:
-    """
-    Roda o parser especializado no ZIP em memória e retorna Publicacoes formatadas.
-    """
-    if not mb_portaria_parser:
-        return []
-    
+    if not mb_portaria_parser: return []
     results = []
     try:
-        # Usa BytesIO para simular arquivo
         zip_io = io.BytesIO(zip_bytes)
-        
-        # Chama a função do parser
         agg, pid_to_hint = mb_portaria_parser.parse_zip_in_memory(zip_io)
         
         for pid, rows in agg.items():
             hint = pid_to_hint.get(pid, "Ato orçamentário MPO")
+            # Gera APENAS os dados contábeis
+            analysis_text = mb_portaria_parser.render_whatsapp_block(pid, hint, rows)
             
-            # Gera o texto bonitinho usando o helper do parser
-            text_formatted = mb_portaria_parser.render_whatsapp_block(pid, hint, rows)
-            
+            type_str = pid
+            if "PORTARIA" not in pid.upper():
+                type_str = f"PORTARIA GM/MPO Nº {pid}"
+
             pub = Publicacao(
                 organ="Ministério do Planejamento e Orçamento",
-                type=f"Portaria Nº {pid}",
+                type=type_str,
                 summary=hint,
-                raw=text_formatted,
-                relevance_reason=text_formatted, # O texto completo vai aqui
-                section="DO1", # Geralmente orçamento está na seção 1
+                raw=analysis_text,
+                relevance_reason=analysis_text,
+                section="DO1", # Força Seção 1
                 is_mpo_navy_hit=True,
-                is_parsed_mpo=True # Flag crítica
+                is_parsed_mpo=True
             )
             results.append(pub)
-            
     except Exception as e:
         print(f"Erro no Parser MPO: {e}")
-    
     return results
 
 
@@ -604,141 +568,66 @@ def extract_xml_from_zip(zip_bytes: bytes) -> List[bytes]:
 # /processar-inlabs (COM REDUNDÂNCIA E PARSER MPO)
 # =====================================================================================
 @app.post("/processar-inlabs", response_model=ProcessResponse)
-async def processar_inlabs(
-    data: str = Form(..., description="YYYY-MM-DD"),
-    sections: Optional[str] = Form("DO1,DO2", description="Ex.: 'DO1,DO2,DO3'"),
-    keywords_json: Optional[str] = Form(
-        None,
-        description='JSON lista de keywords. Ex: \'["amazul","prosub"]\'',
-    ),
-):
-    secs = (
-        [s.strip().upper() for s in sections.split(",") if s.strip()]
-        if sections
-        else ["DO1"]
-    )
-    custom_keywords: List[str] = []
-    if keywords_json:
-        try:
-            keywords_list = json.loads(keywords_json)
-            if isinstance(keywords_list, list):
-                custom_keywords = [
-                    str(k).strip().lower()
-                    for k in keywords_list
-                    if str(k).strip()
-                ]
-        except json.JSONDecodeError:
-            pass
-
-    pubs_final: List[Publicacao] = []
+async def processar_inlabs(data: str = Form(...), sections: str = Form("DO1,DO2"), keywords_json: str = Form(None)):
+    secs = [s.strip().upper() for s in sections.split(",")]
+    custom_kw = json.loads(keywords_json) if keywords_json else []
+    pubs_final = []
     usou_fallback = False
-    erro_principal = ""
 
-    # --- TENTATIVA 1: INLABS (XML/ZIP) ---
-    print(f">>> Tentando InLabs (Principal) para {data}...")
     try:
         client = await inlabs_login_and_get_session()
-        try:
-            listing_url = await resolve_date_url(client, data)
-            html = await fetch_listing_html(client, data)
-            zip_links = pick_zip_links_from_listing(html, listing_url, secs)
-            
-            if not zip_links:
-                raise HTTPException(status_code=404, detail="ZIPs não encontrados.")
+        html = await fetch_listing_html(client, data)
+        zips = pick_zip_links_from_listing(html, "", secs)
+        if not zips: raise HTTPException(404, "ZIPs não encontrados")
 
-            all_xml_blobs = []
-            for zurl in zip_links:
-                print(f"Baixando {zurl}...")
-                zb = await download_zip(client, zurl)
-                
-                # --- [NOVO] PASSO A: RODA O PARSER ESPECIALIZADO DE PORTARIAS ---
-                if mb_portaria_parser:
-                    print("Rodando Parser MPO especializado...")
-                    mpo_pubs = run_mpo_parser_on_zip(zb)
-                    pubs_final.extend(mpo_pubs)
-                
-                # --- PASSO B: RODA O PARSER GENÉRICO (XML) ---
-                all_xml_blobs.extend(extract_xml_from_zip(zb))
+        for url in zips:
+            zb = await download_zip(client, url)
             
-            # Lógica de parse do XML genérico
-            materias: Dict[str, Dict[str, Any]] = {}
-            for blob in all_xml_blobs:
+            # 1. PARSER MPO (Prioridade)
+            if mb_portaria_parser:
+                pubs_final.extend(run_mpo_parser_on_zip(zb))
+            
+            # 2. PARSER GENÉRICO (XML)
+            for blob in extract_xml_from_zip(zb):
                 try:
                     soup = BeautifulSoup(blob, "lxml-xml")
-                    article = soup.find("article")
-                    if not article: continue
-                    materia_id = article.get("idMateria")
-                    if not materia_id: continue
-                    if materia_id not in materias:
-                        materias[materia_id] = {"main_article": None, "full_text": ""}
-                    materias[materia_id]["full_text"] += (blob.decode("utf-8", errors="ignore") + "\n")
-                    body = article.find("body")
-                    if body and body.find("Identifica") and body.find("Identifica").get_text(strip=True):
-                        materias[materia_id]["main_article"] = article
-                except: continue
-            
-            for materia_id, content in materias.items():
-                if content["main_article"]:
-                    publication = process_grouped_materia(
-                        content["main_article"], content["full_text"], custom_keywords
-                    )
-                    if publication:
-                        # Evita duplicata se o Parser Especializado já pegou (pelo tipo)
-                        # Essa verificação é simples, pode ser refinada
-                        is_dup = any(p.type == publication.type for p in pubs_final if p.is_parsed_mpo)
+                    art = soup.find("article")
+                    if not art: continue
+                    
+                    # Usa a função de extração antiga para pegar o resto
+                    p = process_grouped_materia(art, blob.decode("utf-8", "ignore"), custom_kw)
+                    if p:
+                        # Evita duplicata se o Parser MPO já pegou esta mesma portaria
+                        is_dup = any(p.type == existing.type for existing in pubs_final if existing.is_parsed_mpo)
                         if not is_dup:
-                            pubs_final.append(publication)
-            
-        finally:
-            await client.aclose()
+                            pubs_final.append(p)
+                except: continue
+        await client.aclose()
 
     except Exception as e:
-        print(f"⚠️ Falha no InLabs: {e}")
-        erro_principal = str(e)
-        usou_fallback = True
+        print(f"Erro InLabs: {e}"); usou_fallback = True
 
-    # --- TENTATIVA 2: FALLBACK (DOU PÚBLICO) ---
     if usou_fallback and executar_fallback:
-        print(f">>> Acionando Fallback (in.gov.br) para {data}...")
         try:
-            fb_results = await executar_fallback(data, custom_keywords)
-            
-            for item in fb_results:
+            fb = await executar_fallback(data, custom_kw)
+            for i in fb:
                 pubs_final.append(Publicacao(
-                    organ=item['organ'],
-                    type=item['type'],
-                    summary=item['summary'],
-                    raw=item['raw'],
-                    relevance_reason=item['relevance_reason'] + " (Modo Redundância)",
-                    section=item['section'],
-                    clean_text=item['raw'],
-                    is_parsed_mpo=False
+                    organ=i['organ'], type=i['type'], summary=i['summary'],
+                    raw=i['raw'], relevance_reason=i['relevance_reason']+" (Fallback)",
+                    section=i['section'], clean_text=i['raw'], is_parsed_mpo=False
                 ))
-        except Exception as e_fb:
-            print(f"Erro no Fallback: {e_fb}")
-            if not pubs_final:
-                raise HTTPException(status_code=500, detail=f"Erro InLabs ({erro_principal}) E Erro Fallback ({e_fb})")
+        except: pass
 
-    # --- Deduplicação e Retorno ---
-    seen: Set[str] = set()
-    merged: List[Publicacao] = []
+    # Deduplicação Final
+    seen = set()
+    unique = []
     for p in pubs_final:
-        # Chave única melhorada
-        key = f"{p.organ}-{p.type}-{str(p.summary)[:50]}"
-        if key not in seen:
-            seen.add(key)
-            merged.append(p)
-
-    texto = monta_whatsapp(merged, data)
-    
-    if usou_fallback:
-        texto = "⚠️ *Aviso: Sistema InLabs indisponível. Dados obtidos via busca no DOU Público.*\n\n" + texto
+        k = f"{p.organ}{p.type}{str(p.summary)[:30]}"
+        if k not in seen: seen.add(k); unique.append(p)
 
     return ProcessResponse(
-        date=data,
-        count=len(merged),
-        publications=merged,
-        whatsapp_text=texto,
+        date=data, count=len(unique), publications=unique,
+        whatsapp_text=monta_whatsapp(unique, data)
     )
 
 # =====================================================================================
