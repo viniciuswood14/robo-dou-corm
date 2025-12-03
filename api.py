@@ -53,6 +53,14 @@ except ImportError:
 # Adicionar logo após os outros imports do PAC no api.py
 from check_pac import HISTORICAL_CACHE_PATH
 
+# ... (outras importações)
+try:
+    from orcamentobr import despesa_detalhada
+    # Adicione HISTORICAL_CACHE_PATH aqui:
+    from check_pac import update_pac_historical_cache, HISTORICAL_CACHE_PATH 
+except ImportError:
+    pass
+
 # =====================================================================================
 # API SETUP
 # =====================================================================================
@@ -70,6 +78,18 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     print(">>> SISTEMA UNIFICADO INICIADO: API + SITE + ROBÔ <<<")
+
+    # --- [NOVO BLOCO] Verificação Inicial do Cache PAC ---
+    try:
+        if not os.path.exists(HISTORICAL_CACHE_PATH):
+            print("⚠️ Cache do PAC não encontrado. Iniciando geração inicial em background...")
+            asyncio.create_task(update_pac_historical_cache())
+        else:
+            print("✅ Cache do PAC já existe.")
+    except Exception as e:
+        print(f"Erro ao verificar cache PAC: {e}")
+    # -----------------------------------------------------
+
     try:
         from run_check import main_loop
         asyncio.create_task(main_loop())
