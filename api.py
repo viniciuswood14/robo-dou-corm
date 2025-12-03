@@ -762,6 +762,19 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
              totais['dotacao_disponivel'] = totais.get('saldo_disponivel') or totais.get('saldo_dotacao') or 0.0
         return totais
     except: return None
+ 
+@app.get("/api/pac-data/historical-dotacao")
+async def get_pac_historical():
+    """Retorna o JSON de cache histórico para o gráfico."""
+    try:
+        if os.path.exists(HISTORICAL_CACHE_PATH):
+            with open(HISTORICAL_CACHE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        else:
+            # Se não existir, tenta gerar agora ou retorna vazio
+            return {"labels": [], "datasets": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pac-data/{ano}")
 async def get_pac_data(ano: int = Path(..., ge=2010, le=2025)):
@@ -789,24 +802,11 @@ async def get_pac_data(ano: int = Path(..., ge=2010, le=2025)):
         for k,v in soma.items(): total[k]+=v
     tabela.append({'PROGRAMA': 'Total Geral', 'AÇÃO': None, **total})
     return tabela
-
+    
 @app.post("/api/admin/force-update-pac")
 async def force_update_pac():
     await update_pac_historical_cache()
     return {"status": "OK"}
-    
-@app.get("/api/pac-data/historical-dotacao")
-async def get_pac_historical():
-    """Retorna o JSON de cache histórico para o gráfico."""
-    try:
-        if os.path.exists(HISTORICAL_CACHE_PATH):
-            with open(HISTORICAL_CACHE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        else:
-            # Se não existir, tenta gerar agora ou retorna vazio
-            return {"labels": [], "datasets": []}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # --- LEGISLATIVO ---
 @app.post("/processar-legislativo")
