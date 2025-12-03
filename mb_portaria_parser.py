@@ -38,11 +38,21 @@ def _extract_header_hint(text: str) -> str:
     return pre.strip()[:250].rstrip(" ,;") + "..."
 
 def _port_id_from_text(text: str, name_attr: str) -> str:
-    m = re.search(r"PORTARIA\s+GM/?MPO\s+N[ºo]?\s*(\d+).+?DE\s+(20\d{2})", text, flags=re.I)
+    # MODIFICAÇÃO: Aceita GM/MPO, SOF/MPO ou apenas MPO
+    # Regex ajustada para: PORTARIA (qualquer coisa) MPO ...
+    m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?DE\s+(20\d{2})", text, flags=re.I)
     if m: return f"{m.group(1)}/{m.group(2)}"
-    m3 = re.search(r"Portaria\s+GM\.?/?MPO\s+n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
+    
+    # Tentativa pelo atributo name do XML (caso o texto falhe)
+    m3 = re.search(r"Portaria\s+(?:[A-Z]+\.?/?)*MPO\s+n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
     if m3: return f"{m3.group(1)}/{m3.group(2)}"
-    return "PORTARIA GM/MPO"
+    
+    # Fallback genérico se encontrar "Portaria" e "MPO" próximos
+    if "PORTARIA" in text.upper() and "MPO" in text.upper():
+         m_gen = re.search(r"N[ºo]?\s*(\d+).+?DE\s+(20\d{2})", text, flags=re.I)
+         if m_gen: return f"{m_gen.group(1)}/{m_gen.group(2)}"
+
+    return "PORTARIA MPO (ID não identificado)"
 
 def _group_files_by_base(zip_names: Iterable[str]) -> Dict[str, List[Tuple[int, str]]]:
     groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
