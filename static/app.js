@@ -7,7 +7,7 @@ document.addEventListener("DOMContentLoaded", function() {
   const btnProcessar = el("btnProcessar");
   const btnProcessarIA = el("btnProcessarIA");
   const btnProcessarValor = el("btnProcessarValor");
-  const btnTesteFallback = el("btnTesteFallback"); // [NOVO]
+  const btnTesteFallback = el("btnTesteFallback");
   const btnCopiar = el("btnCopiar");
   const preview = el("preview");
 
@@ -70,7 +70,7 @@ document.addEventListener("DOMContentLoaded", function() {
     if (btnProcessar) btnProcessar.disabled = true;
     if (btnProcessarIA) btnProcessarIA.disabled = true;
     if (btnProcessarValor) btnProcessarValor.disabled = true;
-    if (btnTesteFallback) btnTesteFallback.disabled = true; // [NOVO]
+    if (btnTesteFallback) btnTesteFallback.disabled = true;
     if (btnCopiar) btnCopiar.disabled = true;
 
     if (preview) {
@@ -103,7 +103,7 @@ document.addEventListener("DOMContentLoaded", function() {
       if (btnProcessar) btnProcessar.disabled = false;
       if (btnProcessarIA) btnProcessarIA.disabled = false;
       if (btnProcessarValor) btnProcessarValor.disabled = false;
-      if (btnTesteFallback) btnTesteFallback.disabled = false; // [NOVO]
+      if (btnTesteFallback) btnTesteFallback.disabled = false;
       if (preview) preview.classList.remove("loading");
     }
   }
@@ -118,16 +118,24 @@ document.addEventListener("DOMContentLoaded", function() {
   if (btnProcessarValor) {
     btnProcessarValor.addEventListener("click", () => handleProcessing("/processar-valor-ia"));
   }
-  // [NOVO LISTENER]
   if (btnTesteFallback) {
     btnTesteFallback.addEventListener("click", () => handleProcessing("/teste-fallback"));
   }
 
-  // Botão Copiar
+  // Botão Copiar (Atualizado com Feedback Visual)
   if (btnCopiar) {
     btnCopiar.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(preview.textContent || "");
+        
+        // Feedback Visual: Pisca a caixa em verde
+        preview.style.backgroundColor = "#d4edda"; 
+        preview.style.transition = "background-color 0.2s";
+        setTimeout(() => {
+            preview.style.backgroundColor = ""; 
+        }, 300);
+
+        // Feedback no Botão
         btnCopiar.textContent = "Copiado!";
         setTimeout(() => (btnCopiar.textContent = "Copiar Relatório"), 1200);
       } catch (err) {
