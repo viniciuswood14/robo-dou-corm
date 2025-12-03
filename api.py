@@ -50,6 +50,9 @@ except ImportError:
     print("Aviso: 'mb_portaria_parser.py' não encontrado. Usando apenas análise genérica.")
     mb_portaria_parser = None
 
+# Adicionar logo após os outros imports do PAC no api.py
+from check_pac import HISTORICAL_CACHE_PATH
+
 # =====================================================================================
 # API SETUP
 # =====================================================================================
@@ -771,6 +774,19 @@ async def get_pac_data(ano: int = Path(..., ge=2010, le=2025)):
 async def force_update_pac():
     await update_pac_historical_cache()
     return {"status": "OK"}
+    
+@app.get("/api/pac-data/historical-dotacao")
+async def get_pac_historical():
+    """Retorna o JSON de cache histórico para o gráfico."""
+    try:
+        if os.path.exists(HISTORICAL_CACHE_PATH):
+            with open(HISTORICAL_CACHE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        else:
+            # Se não existir, tenta gerar agora ou retorna vazio
+            return {"labels": [], "datasets": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- LEGISLATIVO ---
 @app.post("/processar-legislativo")
