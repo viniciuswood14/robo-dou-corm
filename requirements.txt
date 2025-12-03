@@ -1,10 +1,11 @@
 fastapi
 uvicorn
 httpx
-python-multipart
 beautifulsoup4
 lxml
+python-multipart
 google-generativeai
-google-api-python-client
-orcamentobr
 pandas
+numpy
+orcamentobr
+requests
