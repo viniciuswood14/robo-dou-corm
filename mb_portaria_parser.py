@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Nome do arquivo: mb_portaria_parser.py
-Versão: 2.3 (Leitura Dupla Identifica/Texto + Regex Permissiva)
+Versão: 2.4 (Correção Lógica de Validação + Leitura artCategory)
 Descrição: Parser especializado para Portarias orçamentárias (GM, SOF, SE) do MPO.
 """
 from __future__ import annotations
@@ -26,7 +26,6 @@ MB_UGS_DEFAULT = {
 
 def _sanitize_html_content(html_str: str) -> str:
     if not html_str: return ""
-    # Remove entidades comuns e limpa tags agressivamente se necessário
     s = html_str.replace("&nbsp;", " ").replace("&quot;", '"').replace("&apos;", "'")
     return s
 
@@ -38,7 +37,6 @@ def _html_to_text(html: str) -> str:
         txt = " ".join(x.strip() for x in root.itertext() if x.strip())
         return re.sub(r"\s+", " ", txt)
     except Exception:
-        # Fallback: remove tags na força bruta
         return re.sub(r"<[^>]+>", " ", html).strip()
 
 def _extract_header_hint(text: str) -> str:
@@ -56,11 +54,7 @@ def _extract_header_hint(text: str) -> str:
     return pre.strip()[:250].rstrip(" ,;") + "..."
 
 def _port_id_from_text(text: str, name_attr: str) -> str:
-    """
-    Extrai o número da Portaria com regex permissiva.
-    """
     # 1. Tenta formato padrão completo
-    # Ex: PORTARIA SOF/MPO Nº 470... 2025
     m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?(20\d{2})", text, flags=re.I)
     if m: return f"{m.group(1)}/{m.group(2)}"
     
@@ -72,7 +66,6 @@ def _port_id_from_text(text: str, name_attr: str) -> str:
     if "MPO" in text.upper() or "PLANEJAMENTO" in text.upper():
         m3 = re.search(r"(?:PORTARIA|RESOLUÇÃO).*?N[ºo]?\s*(\d+)", text, flags=re.I)
         if m3:
-             # Tenta achar ano separado
              ano = "2025" 
              m_ano = re.search(r"(202\d)", text)
              if m_ano: ano = m_ano.group(1)
@@ -171,7 +164,6 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
         base_to_pid = {}
         base_to_hint = {}
 
-        # Passo 1: Identificar as Matérias
         for base, items in groups.items():
             header_name = items[0][1] 
             try:
@@ -179,20 +171,28 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
                 parser = ET.XMLParser(encoding="utf-8")
                 art = ET.fromstring(xmlb, parser=parser)
                 
-                # Tenta ler de TEXTO
                 text_node = art.find(".//body/Texto")
                 full_text = _html_to_text(text_node.text) if text_node is not None else ""
-                
-                # Tenta ler de IDENTIFICA (Backup, as vezes mais limpo)
                 ident_node = art.find(".//body/Identifica")
                 ident_text = _html_to_text(ident_node.text) if ident_node is not None else ""
                 
                 combined_text = (ident_text + "\n" + full_text).strip()
+                
+                # Pega Categoria do Artigo (MPO/SOF)
+                cat = art.attrib.get("artCategory", "").upper()
 
+                # Extrai PID
                 pid = _port_id_from_text(combined_text, art.attrib.get("name", ""))
                 
-                if "MPO" in pid or "PLANEJAMENTO" in full_text.upper():
-                    print(f"[DEBUG MPO] Identificado: {pid} em {header_name}")
+                # CRITÉRIOS DE ACEITE (CORREÇÃO V2.4):
+                # 1. PID válido (regex pegou "470/2025") -> Aceita
+                # 2. OU Tem "PLANEJAMENTO" no texto/categoria -> Aceita
+                # 3. OU Tem "MPO" no texto/categoria -> Aceita
+                has_valid_id = pid != "PORTARIA MPO (ID n/d)"
+                is_mpo_doc = "PLANEJAMENTO" in cat or "MPO" in cat or "PLANEJAMENTO" in full_text.upper() or "MPO" in full_text.upper()
+                
+                if has_valid_id or is_mpo_doc:
+                    print(f"[DEBUG MPO] Identificado: {pid} (ValidID={has_valid_id}, IsMPO={is_mpo_doc}) em {header_name}")
                     base_to_pid[base] = pid
                     base_to_hint[base] = _extract_header_hint(full_text)
                     
@@ -200,7 +200,6 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
                 print(f"[DEBUG MPO] Erro ao ler header {header_name}: {e}")
                 continue
 
-        # Passo 2: Processar linhas
         for n in xml_names:
             m = re.search(r"\d+_\d+_(\d+)", n)
             if not m: continue
