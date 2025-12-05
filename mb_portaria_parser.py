@@ -1,7 +1,3 @@
-{
-type: uploaded file
-fileName: mb_portaria_parser.py
-fullContent:
 # -*- coding: utf-8 -*-
 """
 Nome do arquivo: mb_portaria_parser.py
@@ -322,5 +318,3 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
         wa.append(f"⚪ *Remanejamento sem alteração de valor global (QDD).*")
     
     return "\n".join(wa)
-
-}
