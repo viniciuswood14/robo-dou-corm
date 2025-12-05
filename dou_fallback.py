@@ -82,7 +82,7 @@ async def executar_fallback(data_iso: str, keywords: List[str]) -> List[Dict]:
         return []
 
     # Lista corrigida (apenas strings)
-termos_criticos = [
+    termos_criticos = [
         "Marinha do Brasil",
         "Comando da Marinha",
         "Orçamento Fiscal",
@@ -91,14 +91,19 @@ termos_criticos = [
         "Ministério da Defesa",
         "PROSUB",
         "Amazul",
-        # Removi a estrutura de dicionário e deixei apenas os termos textuais relevantes para busca
-        "Caixa de Construções de Casas para o Pessoal da Marinha",
+        "Emgepron",
+        "Nuclep",
+        "52131", # Buscamos pelo código da UG direto
+        "52133",
+        "52232",
+        "52233",
+        "52931", # Fundo Naval
+        "52932",
+        "52000",
+        "Autoridade Marítima",
         "Fundo Naval",
-        "Empresa Gerencial de Projetos Navais",
         "Programação Orçamentária e Financeira",
-        "Programa Nuclear Brasileiro",
-        "Plano Plurianual",
-        "Limites de Movimentação"
+        "Limite de Pagamento"
     ]
     
     # Junta com as keywords do usuário e remove duplicatas
