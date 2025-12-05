@@ -1,7 +1,11 @@
+{
+type: uploaded file
+fileName: mb_portaria_parser.py
+fullContent:
 # -*- coding: utf-8 -*-
 """
 Nome do arquivo: mb_portaria_parser.py
-Versão: 2.1 (Correção SOF/MPO)
+Versão: 2.2 (Correção Regex Data + Sanitização HTML)
 Descrição: Parser especializado para Portarias orçamentárias (GM, SOF, SE) do MPO.
 """
 from __future__ import annotations
@@ -24,14 +28,27 @@ MB_UGS_DEFAULT = {
     "52000"  # Ministério da Defesa (Administração Direta - Ocasional)
 }
 
+def _sanitize_html_content(html_str: str) -> str:
+    """
+    Remove entidades HTML que quebram o XML Parser padrão (ex: &nbsp;)
+    e limpa espaços excessivos.
+    """
+    if not html_str: return ""
+    # Substitui entidades comuns que não são XML-compliant
+    s = html_str.replace("&nbsp;", " ").replace("&quot;", '"').replace("&apos;", "'")
+    return s
+
 def _html_to_text(html: str) -> str:
     if not html: return ""
     try:
+        clean_html = _sanitize_html_content(html)
         # Envolve em tag root para garantir validade se for fragmento
-        root = ET.fromstring(f"<root>{html}</root>")
+        root = ET.fromstring(f"<root>{clean_html}</root>")
         txt = " ".join(x.strip() for x in root.itertext() if x.strip())
         return re.sub(r"\s+", " ", txt)
-    except: return ""
+    except Exception:
+        # Fallback agressivo (regex) se o XML parser falhar
+        return re.sub(r"<[^>]+>", " ", html).strip()
 
 def _extract_header_hint(text: str) -> str:
     if not text: return ""
@@ -53,20 +70,20 @@ def _extract_header_hint(text: str) -> str:
 def _port_id_from_text(text: str, name_attr: str) -> str:
     """
     Extrai o número da Portaria.
-    CORREÇÃO v2.1: Aceita GM/MPO, SOF/MPO, SE/MPO ou apenas PORTARIA MPO.
+    CORREÇÃO v2.2: Regex de data mais flexível para aceitar 'DE 28 DE NOVEMBRO DE 2025'.
     """
-    # Regex mais permissiva: PORTARIA + (Siglas Opcionais) + MPO
-    # Ex: PORTARIA SOF/MPO Nº 470
-    m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?DE\s+(20\d{2})", text, flags=re.I)
+    # Regex ajustada: Permite caracteres entre o 'DE' e o Ano (ex: dia e mês)
+    # Procura por: PORTARIA ... MPO ... DE ... 20xx
+    m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?DE\s+.+?(20\d{2})", text, flags=re.I)
     if m: return f"{m.group(1)}/{m.group(2)}"
     
     # Tenta pelo atributo 'name' do XML (nome do arquivo original muitas vezes tem a info)
     m3 = re.search(r"Portaria\s+(?:[A-Z]+\.?/?)*MPO\s+n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
     if m3: return f"{m3.group(1)}/{m3.group(2)}"
     
-    # Última tentativa: Procura "Nº XXX" próximo de "MPO"
+    # Tentativa genérica se tiver 'MPO' no texto
     if "MPO" in text.upper() or "PLANEJAMENTO" in text.upper():
-        m_fallback = re.search(r"(?:PORTARIA|RESOLUÇÃO).*?N[ºo]?\s*(\d+).+?DE\s+(20\d{2})", text, flags=re.I)
+        m_fallback = re.search(r"(?:PORTARIA|RESOLUÇÃO).*?N[ºo]?\s*(\d+).+?DE\s+.+?(20\d{2})", text, flags=re.I)
         if m_fallback:
              return f"{m_fallback.group(1)}/{m_fallback.group(2)}"
 
@@ -104,9 +121,12 @@ def _parse_totals_rows(xml_bytes: bytes, mb_ugs: Iterable[str]) -> List[Dict]:
     
     html = texto.text
     try: 
-        # Parseia o HTML interno da matéria
-        root = ET.fromstring(f"<root>{html}</root>")
-    except: return []
+        # CORREÇÃO v2.2: Sanitiza HTML antes de tentar parsear
+        clean_html = _sanitize_html_content(html)
+        root = ET.fromstring(f"<root>{clean_html}</root>")
+    except Exception as e:
+        # Se falhar o parse do HTML interno, retorna vazio
+        return []
 
     rows = []
     current_ug = None
@@ -155,10 +175,6 @@ def _parse_totals_rows(xml_bytes: bytes, mb_ugs: Iterable[str]) -> List[Dict]:
                 try:
                     val_str = m_val.group(1).replace(".", "").replace(",", ".")
                     val = float(val_str)
-                    
-                    # Evita duplicidade: as vezes o TOTAL vem logo abaixo. 
-                    # Aqui pegamos tudo, depois podemos somar ou filtrar.
-                    # Para simplificar, pegamos linhas que parecem ser Ações (começam com código) ou Totais
                     
                     # Se a linha começa com um código de programa/ação (ex: 2000, 21A0) ou é Total
                     is_action_row = re.match(r"\d{4}", tr_text)
@@ -247,19 +263,17 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
 def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
     """
     Gera o texto formatado para o WhatsApp com base nos dados extraídos.
-    Lógica inteligente para somar totais e evitar repetição de linhas de detalhe.
     """
     # Filtra apenas linhas de TOTAL para o resumo inicial, se existirem
-    # Se não, soma tudo.
-    
     sup_rows = [r for r in rows if r["kind"] == "SUPLEMENTACAO"]
     canc_rows = [r for r in rows if r["kind"] == "CANCELAMENTO"]
 
     # Agrupa valores por UG para limpar duplicatas de parciais vs totais
-    # Estratégia: Usar o maior valor encontrado por UG/Tipo, assumindo que é o "Total Fiscal" ou "Total Geral"
     def get_max_per_ug(row_list):
         ug_max = defaultdict(float)
         for r in row_list:
+            # Soma apenas se forem ações distintas, mas aqui simplificamos pegando o maior valor encontrado (Total)
+            # A lógica de "maior valor" serve para pegar a linha "TOTAL GERAL" se existir, ao invés de somar parciais
             if r["valor"] > ug_max[r["UG"]]:
                 ug_max[r["UG"]] = r["valor"]
         return ug_max
@@ -278,12 +292,12 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
         total_sup = sum(sup_agg.values())
         wa.append(f"🟢 *Suplementação (Crédito):* {_brl(total_sup)}")
         for ug, val in sup_agg.items():
-            # Tenta dar nome à UG se for conhecida
             nome_ug = ""
             if ug == "52131": nome_ug = "- Comando da Marinha"
             elif ug == "52931": nome_ug = "- Fundo Naval"
             elif ug == "52233": nome_ug = "- AMAZUL"
             elif ug == "52232": nome_ug = "- CCCPM"
+            elif ug == "52000": nome_ug = "- MD"
             
             wa.append(f"   └ UG {ug} {nome_ug}: {_brl(val)}")
     
@@ -308,3 +322,5 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
         wa.append(f"⚪ *Remanejamento sem alteração de valor global (QDD).*")
     
     return "\n".join(wa)
+
+}
