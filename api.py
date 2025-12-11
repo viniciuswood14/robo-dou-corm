@@ -668,6 +668,35 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel, prompt_
 # OUTROS ENDPOINTS (Valor, Fallback Teste, PAC, Legislativo)
 # =====================================================================================
 
+# Endpoint para Adicionar/Remover do Monitoramento
+class TrackRequest(BaseModel):
+    uid: str
+    casa: str
+    tipo: str
+    numero: str
+    ano: str
+    ementa: str
+    link: str
+
+@app.post("/legislativo/track")
+async def track_proposition(item: TrackRequest):
+    # Converte Pydantic model para dict
+    res = toggle_tracking(item.dict())
+    return {"status": "ok", "action": res}
+
+# Endpoint para Ler a Watchlist (Dashboard)
+@app.get("/legislativo/watchlist")
+async def get_watchlist():
+    # Retorna a lista atual salva
+    wl = load_watchlist()
+    return list(wl.values())
+
+# Endpoint para Forçar Atualização (Botão "Atualizar Status")
+@app.post("/legislativo/force-update")
+async def force_update_legis():
+    updates = await check_tramitacoes_watchlist()
+    return {"updates_found": len(updates), "data": updates}
+
 @app.post("/processar-valor-ia", response_model=ProcessResponseValor)
 async def processar_valor_ia(data: str = Form(...)):
     # Importa a função do check_valor.py ou api.py (definida acima)
