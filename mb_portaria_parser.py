@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Nome do arquivo: mb_portaria_parser.py
-Versão: 2.4 (Correção Lógica de Validação + Leitura artCategory)
+Versão: 3.0 (Suporte a Portarias de Limites/Bloqueio e Linhas Diretas de UG)
 Descrição: Parser especializado para Portarias orçamentárias (GM, SOF, SE) do MPO.
 """
 from __future__ import annotations
@@ -13,48 +13,61 @@ from xml.etree import ElementTree as ET
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple, Union
 
-# UGs da Marinha (padrão)
+# UGs da Marinha/Defesa (padrão)
 MB_UGS_DEFAULT = {
+    "52111", # Comando da Marinha (Algumas variações)
     "52131", # Comando da Marinha
     "52133", # Secretaria da Comissão Interministerial para os Recursos do Mar
     "52232", # CCCPM
     "52233", # AMAZUL
     "52931", # Fundo Naval
     "52932", # Fundo de Desenvolvimento do Ensino Profissional Marítimo
-    "52000"  # Ministério da Defesa (Administração Direta - Ocasional)
+    "52000", # Ministério da Defesa (Administração Direta)
+    "52121", # Comando do Exército (Opcional, mas às vezes agrupado)
+    "52111"  # Comando da Aeronáutica (Opcional)
 }
 
 def _sanitize_html_content(html_str: str) -> str:
     if not html_str: return ""
-    s = html_str.replace("&nbsp;", " ").replace("&quot;", '"').replace("&apos;", "'")
+    # Remove atributos de namespace que quebram o ET.fromstring as vezes
+    s = re.sub(r'\sxmlns="[^"]+"', '', html_str, count=1)
+    s = s.replace("&nbsp;", " ").replace("&quot;", '"').replace("&apos;", "'")
     return s
 
 def _html_to_text(html: str) -> str:
     if not html: return ""
     try:
         clean_html = _sanitize_html_content(html)
+        # Envolve em root para garantir XML válido
         root = ET.fromstring(f"<root>{clean_html}</root>")
         txt = " ".join(x.strip() for x in root.itertext() if x.strip())
         return re.sub(r"\s+", " ", txt)
     except Exception:
+        # Fallback regex se o XML falhar
         return re.sub(r"<[^>]+>", " ", html).strip()
 
 def _extract_header_hint(text: str) -> str:
     if not text: return ""
-    m = re.search(r"(Abre\s+ao?s?\s+Or(ç|c)amentos?[\s\S]*?vigente\.)", text, flags=re.I)
-    if m: return re.sub(r"\s+", " ", m.group(1)).strip()
     
-    m = re.search(r"(Adequa[\s\S]*?alterações\s+posteriores\.)", text, flags=re.I)
-    if m: return re.sub(r"\s+", " ", m.group(1)).strip()
+    # Tentativas de capturar o objetivo da portaria
+    patterns = [
+        r"(Abre\s+ao?s?\s+Or(ç|c)amentos?[\s\S]*?vigente\.)",
+        r"(Adequa[\s\S]*?alterações\s+posteriores\.)",
+        r"(Altera\s+parcialmente\s+grupos[\s\S]*?vigente\.)",
+        r"(Ajusta\s+os\s+valores\s+constantes[\s\S]*?vigente\.?)",
+        r"(Atualiza\s+os\s+valores[\s\S]*?posteriores\.?)"
+    ]
     
-    m = re.search(r"(Altera\s+parcialmente\s+grupos[\s\S]*?vigente\.)", text, flags=re.I)
-    if m: return re.sub(r"\s+", " ", m.group(1)).strip()
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m: return re.sub(r"\s+", " ", m.group(1)).strip()
 
+    # Fallback: pega o texto antes do ANEXO I
     pre = re.split(r"ANEXO\s+I", text, flags=re.I)[0]
     return pre.strip()[:250].rstrip(" ,;") + "..."
 
 def _port_id_from_text(text: str, name_attr: str) -> str:
-    # 1. Tenta formato padrão completo
+    # 1. Tenta formato padrão completo no texto
     m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?(20\d{2})", text, flags=re.I)
     if m: return f"{m.group(1)}/{m.group(2)}"
     
@@ -62,7 +75,7 @@ def _port_id_from_text(text: str, name_attr: str) -> str:
     m2 = re.search(r"Portaria\s+(?:[A-Z]+\.?/?)*MPO\s+n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
     if m2: return f"{m2.group(1)}/{m2.group(2)}"
     
-    # 3. Fallback: Se tem MPO e "Nº XXX", aceita.
+    # 3. Fallback genérico
     if "MPO" in text.upper() or "PLANEJAMENTO" in text.upper():
         m3 = re.search(r"(?:PORTARIA|RESOLUÇÃO).*?N[ºo]?\s*(\d+)", text, flags=re.I)
         if m3:
@@ -76,9 +89,11 @@ def _port_id_from_text(text: str, name_attr: str) -> str:
 def _group_files_by_base(zip_names: Iterable[str]) -> Dict[str, List[Tuple[int, str]]]:
     groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     for n in zip_names:
-        m = re.search(r"\d+_\d+_(\d+)(?:-(\d+))?\.xml$", n)
+        # Agrupa arquivos divididos (ex: id-1.xml, id-2.xml) ou únicos (id.xml)
+        # Regex ajustada para pegar o ID numérico base
+        m = re.search(r"(\d+)(?:-(\d+))?\.xml$", n, flags=re.I)
         if m:
-            base = m.group(1)
+            base = m.group(1) # O ID da matéria (ex: 23408456)
             suffix = int(m.group(2) or 0)
             groups[base].append((suffix, n))
             
@@ -103,45 +118,76 @@ def _parse_totals_rows(xml_bytes: bytes, mb_ugs: Iterable[str]) -> List[Dict]:
 
     rows = []
     current_ug = None
-    current_kind = None 
+    current_kind = "OUTROS" # Default seguro
     mb_ugs = set(mb_ugs)
 
-    for tr in root.findall(".//tr"):
-        tr_text = " ".join(x.strip() for x in tr.itertext() if x.strip())
+    # Iteramos sobre TODOS os elementos para pegar contexto (<p>) e dados (<tr>)
+    for elem in root.iter():
+        # Normaliza o texto do elemento
+        elem_text = " ".join(x.strip() for x in elem.itertext() if x.strip()).upper()
         
-        m_ug = re.search(r"UNIDADE:?\s*(\d{5})", tr_text)
-        if m_ug:
-            current_ug = m_ug.group(1)
-            current_kind = None 
-            continue
-
-        if "ACRÉSCIMO" in tr_text or "SUPLEMENTA" in tr_text.upper():
+        # 1. Detecção de Contexto (Cabeçalhos fora da tabela)
+        # Prioridade para palavras-chave que indicam o sentido do valor
+        if "REDUÇÃO" in elem_text or "CANCELAMENTO" in elem_text or "BLOQUEIO" in elem_text:
+            current_kind = "CANCELAMENTO" # Bloqueio tratado como redução para alerta visual
+        elif "ACRÉSCIMO" in elem_text or "SUPLEMENTA" in elem_text or "AMPLIAÇÃO" in elem_text:
             current_kind = "SUPLEMENTACAO"
-        elif "REDUÇÃO" in tr_text or "CANCELAMENTO" in tr_text.upper():
-            current_kind = "CANCELAMENTO"
         
-        if "ANEXO I" in tr_text and "ANEXO II" not in tr_text: current_kind = "SUPLEMENTACAO"
-        if "ANEXO II" in tr_text: current_kind = "CANCELAMENTO"
+        # Se for uma linha de tabela, processa os dados
+        if elem.tag == 'tr':
+            tr_text = " ".join(x.strip() for x in elem.itertext() if x.strip())
+            tr_text_upper = tr_text.upper()
 
-        if current_ug in mb_ugs and current_kind:
-            m_val = re.search(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*$", tr_text)
-            is_header = "FUNCIONAL" in tr_text or "PROGRAMÁTICA" in tr_text
+            # Lógica A: UG no cabeçalho (Formato Crédito Suplementar Detalhado)
+            m_ug_header = re.search(r"UNIDADE:?\s*(\d{5})", tr_text, re.I)
+            if m_ug_header:
+                current_ug = m_ug_header.group(1)
+                # O kind geralmente já foi definido pelo contexto anterior
+                continue
+
+            # Identifica se é linha de cabeçalho interno de anexo para reforçar o contexto
+            if "ANEXO" in tr_text_upper and "REDUÇÃO" in tr_text_upper: current_kind = "CANCELAMENTO"
+            if "ANEXO" in tr_text_upper and "AMPLIAÇÃO" in tr_text_upper: current_kind = "SUPLEMENTACAO"
+
+            # Tentativa de extração de valor
+            ug_to_use = current_ug
             
-            if m_val and not is_header:
-                try:
-                    val_str = m_val.group(1).replace(".", "").replace(",", ".")
-                    val = float(val_str)
-                    is_action_row = re.match(r"\d{4}", tr_text)
-                    is_total_row = "TOTAL" in tr_text.upper()
-                    
-                    if (is_action_row or is_total_row) and val > 0:
-                        rows.append({
-                            "UG": current_ug,
-                            "kind": current_kind,
-                            "valor": val
-                        })
-                except: continue
+            # Lógica B: UG na própria linha (Formato Limites/Portaria 495)
+            # Procura por "52000" no início da linha
+            m_ug_inline = re.search(r"^(\d{5})\b", tr_text.strip())
+            if m_ug_inline:
+                ug_candidate = m_ug_inline.group(1)
+                if ug_candidate in mb_ugs:
+                    ug_to_use = ug_candidate
+            
+            # Se temos uma UG alvo identificada (seja pelo header ou inline)
+            if ug_to_use in mb_ugs:
+                # Regex para pegar valores monetários (ex: 1.181.099,00 ou 1.181.099)
+                # Pega todos os valores da linha
+                matches = re.findall(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)", tr_text)
                 
+                if matches:
+                    # Normalmente o valor relevante é o último (Total) ou o único da linha
+                    val_str = matches[-1].replace(".", "").replace(",", ".")
+                    try:
+                        val = float(val_str)
+                        
+                        # Filtros de ruído
+                        is_year = "2024" in tr_text or "2025" in tr_text
+                        # Se o valor for igual ao ano (ex: 2025.0), ignora, a menos que seja muito grande
+                        if is_year and val == 2025.0: continue
+                        
+                        if val > 0:
+                            rows.append({
+                                "UG": ug_to_use,
+                                "kind": current_kind,
+                                "valor": val
+                            })
+                            # Reseta UG inline para não poluir próximas linhas
+                            if m_ug_inline: current_ug = None
+                            
+                    except: continue
+
     return rows
 
 def _brl(n: float) -> str:
@@ -165,6 +211,7 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
         base_to_hint = {}
 
         for base, items in groups.items():
+            # Tenta ler o header do primeiro arquivo do grupo
             header_name = items[0][1] 
             try:
                 with z.open(header_name) as f: xmlb = f.read()
@@ -178,21 +225,14 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
                 
                 combined_text = (ident_text + "\n" + full_text).strip()
                 
-                # Pega Categoria do Artigo (MPO/SOF)
                 cat = art.attrib.get("artCategory", "").upper()
-
-                # Extrai PID
                 pid = _port_id_from_text(combined_text, art.attrib.get("name", ""))
                 
-                # CRITÉRIOS DE ACEITE (CORREÇÃO V2.4):
-                # 1. PID válido (regex pegou "470/2025") -> Aceita
-                # 2. OU Tem "PLANEJAMENTO" no texto/categoria -> Aceita
-                # 3. OU Tem "MPO" no texto/categoria -> Aceita
+                # Critérios de Aceite
                 has_valid_id = pid != "PORTARIA MPO (ID n/d)"
                 is_mpo_doc = "PLANEJAMENTO" in cat or "MPO" in cat or "PLANEJAMENTO" in full_text.upper() or "MPO" in full_text.upper()
                 
                 if has_valid_id or is_mpo_doc:
-                    print(f"[DEBUG MPO] Identificado: {pid} (ValidID={has_valid_id}, IsMPO={is_mpo_doc}) em {header_name}")
                     base_to_pid[base] = pid
                     base_to_hint[base] = _extract_header_hint(full_text)
                     
@@ -200,8 +240,10 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
                 print(f"[DEBUG MPO] Erro ao ler header {header_name}: {e}")
                 continue
 
+        # Processa TODOS os arquivos XML (partes da mesma matéria)
         for n in xml_names:
-            m = re.search(r"\d+_\d+_(\d+)", n)
+            # Encontra a base deste arquivo
+            m = re.search(r"(\d+)(?:-(\d+))?\.xml$", n)
             if not m: continue
             
             base = m.group(1)
@@ -209,6 +251,7 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
                 pid = base_to_pid[base]
                 try:
                     with z.open(n) as f:
+                        # Extrai linhas de dados deste arquivo
                         rows = _parse_totals_rows(f.read(), mb_ugs)
                         if rows:
                             agg[pid].extend(rows)
@@ -224,15 +267,15 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
     sup_rows = [r for r in rows if r["kind"] == "SUPLEMENTACAO"]
     canc_rows = [r for r in rows if r["kind"] == "CANCELAMENTO"]
 
-    def get_max_per_ug(row_list):
-        ug_max = defaultdict(float)
+    # Agrupa valores por UG (soma se houver múltiplas linhas para a mesma UG)
+    def aggregate_per_ug(row_list):
+        ug_sum = defaultdict(float)
         for r in row_list:
-            if r["valor"] > ug_max[r["UG"]]:
-                ug_max[r["UG"]] = r["valor"]
-        return ug_max
+            ug_sum[r["UG"]] += r["valor"]
+        return ug_sum
 
-    sup_agg = get_max_per_ug(sup_rows)
-    canc_agg = get_max_per_ug(canc_rows)
+    sup_agg = aggregate_per_ug(sup_rows)
+    canc_agg = aggregate_per_ug(canc_rows)
 
     wa = []
     wa.append(f"🔎 *Análise Contábil Automática ({pid})*")
@@ -241,22 +284,24 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
 
     if sup_agg:
         total_sup = sum(sup_agg.values())
-        wa.append(f"🟢 *Suplementação (Crédito):* {_brl(total_sup)}")
+        wa.append(f"🟢 *Ampliação/Suplementação:* {_brl(total_sup)}")
         for ug, val in sup_agg.items():
             nome_ug = ""
-            if ug == "52131": nome_ug = "- Comando da Marinha"
-            elif ug == "52931": nome_ug = "- Fundo Naval"
+            if ug == "52131": nome_ug = "- CM"
+            elif ug == "52931": nome_ug = "- FuN"
             elif ug == "52233": nome_ug = "- AMAZUL"
-            elif ug == "52232": nome_ug = "- CCCPM"
             elif ug == "52000": nome_ug = "- MD"
             wa.append(f"   └ UG {ug} {nome_ug}: {_brl(val)}")
     
     if canc_agg:
         if sup_agg: wa.append("") 
         total_canc = sum(canc_agg.values())
-        wa.append(f"🔴 *Cancelamento (Redução):* {_brl(total_canc)}")
+        # Usa termo genérico para cobrir Bloqueio e Redução
+        wa.append(f"🔴 *Redução/Bloqueio:* {_brl(total_canc)}")
         for ug, val in canc_agg.items():
-            wa.append(f"   └ UG {ug}: {_brl(val)}")
+            nome_ug = ""
+            if ug == "52000": nome_ug = "- MD"
+            wa.append(f"   └ UG {ug} {nome_ug}: {_brl(val)}")
 
     total_sup = sum(sup_agg.values())
     total_canc = sum(canc_agg.values())
@@ -268,6 +313,6 @@ def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
     elif net < 0:
         wa.append(f"🔻 *Saldo Líquido Negativo:* {_brl(net)}")
     else:
-        wa.append(f"⚪ *Remanejamento sem alteração de valor global (QDD).*")
+        wa.append(f"⚪ *Remanejamento sem alteração de valor global.*")
     
     return "\n".join(wa)
