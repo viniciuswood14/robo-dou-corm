@@ -20,17 +20,15 @@ STATE_FILE_PATH = os.environ.get("LEG_STATE_FILE_PATH", "legislativo_state.json"
 
 # Lista de palavras-chave estratégicas para a Marinha
 KEYWORDS = [
-    "marinha", "forças armadas", "defesa", "submarino", "nuclear", 
+    "marinha", "forças armadas", "defesa", "submarino",  
     "amazônia azul", "prosub", "tamandaré", "fundo naval", 
-    "base industrial", "militar", "autoridade marítima", "emgepron",
-    "cisb", "ctmsp", "amazul", "nuclep", "orçamento", "crédito", 
-    "pln", "suplementar", "especial", "extraordinário", "fiscal",
-    "teto de gastos", "arcabouço", "meta fiscal"
+    "base industrial de defesa", "autoridade marítima", "emgepron",
+    "ctmsp", "amazul", "teto de gastos", "arcabouço", "meta fiscal"
 ]
 
 # Siglas de interesse
 SENADO_SIGLAS = ["PLN", "PL", "PEC", "MPV", "PDL"]
-CAMARA_SIGLAS = ["PL", "PLP", "PEC", "MPV"]
+CAMARA_SIGLAS = ["PL", "PLP", "PEC", "MPV", "PLN"]
 
 URL_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 URL_SENADO = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista"
