@@ -374,13 +374,12 @@ def process_grouped_materia(
                     break
         
         # Keywords de Orçamento (atos do MPO/SOF que merecem ALWAYS ON)
-        if not is_relevant and (is_mpo or "ministério da fazenda" in organ.lower()):
+        if not is_relevant and (is_mpo or "ministério da fazenda" in organ_lower):
             if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
-            is_relevant = True
-            # Marca como "hit" para NÃO ser filtrado pela IA mesmo que ela diga "sem impacto"
-            is_mpo_navy_hit_flag = True  
-            reason = "MB: para conhecimento. Ato orçamentário do MPO (SOF) relevante para execução/limites."
-
+                is_relevant = True
+                # Marca como "hit" para NÃO ser filtrado pela IA mesmo que ela diga "sem impacto"
+                is_mpo_navy_hit_flag = True
+                reason = "MB: para conhecimento. Ato orçamentário do MPO (SOF) relevante para execução/limites."
     elif "DO2" in section:
         try: soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
         except: soup_copy = BeautifulSoup(full_text_content, "html.parser")
