@@ -68,6 +68,12 @@ try:
 except ImportError:
     pass
 
+try:
+    # Adicione find_proposition aqui
+    from check_legislativo import toggle_tracking, load_watchlist, check_tramitacoes_watchlist, find_proposition
+except ImportError:
+    pass
+
 # =====================================================================================
 # API SETUP
 # =====================================================================================
@@ -696,6 +702,26 @@ async def get_watchlist():
 async def force_update_legis():
     updates = await check_tramitacoes_watchlist()
     return {"updates_found": len(updates), "data": updates}
+
+# Modelo para a busca manual
+class ManualSearch(BaseModel):
+    casa: str
+    sigla: str
+    numero: str
+    ano: str
+
+@app.post("/legislativo/add-manual")
+async def add_manual_proposition(search: ManualSearch):
+    # 1. Busca os dados reais na API oficial
+    found_item = await find_proposition(search.casa, search.sigla, search.numero, search.ano)
+    
+    if not found_item:
+        return {"status": "error", "message": "Proposição não encontrada nas bases oficiais. Verifique a sigla e o número."}
+    
+    # 2. Adiciona à watchlist
+    toggle_tracking(found_item)
+    
+    return {"status": "ok", "message": f"Projeto {found_item['tipo']} {found_item['numero']} localizado e adicionado!", "data": found_item}
 
 @app.post("/processar-valor-ia", response_model=ProcessResponseValor)
 async def processar_valor_ia(data: str = Form(...)):
