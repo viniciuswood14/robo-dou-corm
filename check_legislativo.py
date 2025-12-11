@@ -335,3 +335,77 @@ async def check_tramitacoes_watchlist() -> List[Dict]:
         save_watchlist(watchlist)
         
     return updates
+
+
+# Adicione ao final do check_legislativo.py, ou junto das outras funções de check
+
+async def find_proposition(casa: str, sigla: str, numero: str, ano: str) -> Dict:
+    """Busca uma proposição específica para obter seus metadados e ID."""
+    
+    async with httpx.AsyncClient(timeout=15) as client:
+        
+        # --- BUSCA NA CÂMARA ---
+        if casa == 'Câmara':
+            url = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
+            params = {
+                "siglaTipo": sigla.strip().upper(),
+                "numero": numero.strip(),
+                "ano": ano.strip(),
+                "ordem": "DESC",
+                "ordenarPor": "id"
+            }
+            try:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 200:
+                    dados = resp.json().get('dados', [])
+                    if dados:
+                        # Retorna o primeiro match
+                        item = dados[0]
+                        return {
+                            "uid": f"CAM_{item['id']}",
+                            "casa": "Câmara",
+                            "tipo": item['siglaTipo'],
+                            "numero": str(item['numero']),
+                            "ano": str(item['ano']),
+                            "ementa": item['ementa'],
+                            "link": f"https://www.camara.leg.br/propostas-legislativas/{item['id']}",
+                            "last_status": "Adicionado Manualmente"
+                        }
+            except Exception as e:
+                print(f"Erro busca manual Câmara: {e}")
+
+        # --- BUSCA NO SENADO ---
+        elif casa == 'Senado':
+            url = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista"
+            headers = {"Accept": "application/json"}
+            params = {
+                "sigla": sigla.strip().upper(),
+                "numero": numero.strip(),
+                "ano": ano.strip()
+            }
+            try:
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    lista = data.get('PesquisaBasicaMateria', {}).get('Materias', {}).get('Materia', [])
+                    if isinstance(lista, dict): lista = [lista]
+                    
+                    if lista:
+                        # Pega o primeiro
+                        dados = lista[0].get('DadosBasicosMateria', {})
+                        cod = dados.get('CodigoMateria')
+                        if cod:
+                            return {
+                                "uid": f"SEN_{cod}",
+                                "casa": "Senado",
+                                "tipo": dados.get('SiglaMateria'),
+                                "numero": str(dados.get('NumeroMateria')),
+                                "ano": str(dados.get('AnoMateria')),
+                                "ementa": dados.get('EmentaMateria'),
+                                "link": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{cod}",
+                                "last_status": "Adicionado Manualmente"
+                            }
+            except Exception as e:
+                print(f"Erro busca manual Senado: {e}")
+
+    return None # Não encontrou
