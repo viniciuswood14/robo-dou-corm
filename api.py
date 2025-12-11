@@ -61,6 +61,13 @@ try:
 except ImportError:
     pass
 
+# No api.py (imports)
+try:
+    # Importe as novas funções
+    from check_legislativo import toggle_tracking, load_watchlist, check_tramitacoes_watchlist
+except ImportError:
+    pass
+
 # =====================================================================================
 # API SETUP
 # =====================================================================================
