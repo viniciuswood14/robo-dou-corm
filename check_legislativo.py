@@ -232,3 +232,106 @@ async def check_and_process_legislativo(only_new: bool = True, days_back: int = 
         return all_proposals
 
     return new_for_telegram
+
+# Adicione ao check_legislativo.py
+
+# Arquivo para salvar os projetos que estamos monitorando
+TRACKING_FILE = "legislativo_watchlist.json"
+
+def load_watchlist() -> Dict:
+    try:
+        with open(TRACKING_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_watchlist(data: Dict):
+    with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+
+# --- FUNÇÃO PARA ADICIONAR PROJETO AO MONITORAMENTO ---
+def toggle_tracking(item_data: Dict) -> str:
+    """Adiciona ou remove um item da lista de monitoramento."""
+    watchlist = load_watchlist()
+    uid = item_data.get('uid')
+    
+    if uid in watchlist:
+        del watchlist[uid]
+        save_watchlist(watchlist)
+        return "removido"
+    else:
+        # Salva apenas o essencial para consultar depois
+        watchlist[uid] = {
+            "casa": item_data.get('casa'),
+            "id_api": item_data.get('uid').split('_')[1], # Remove o prefixo CAM_ ou SEN_
+            "sigla": item_data.get('tipo'),
+            "numero": item_data.get('numero'),
+            "ano": item_data.get('ano'),
+            "ementa": item_data.get('ementa'),
+            "link": item_data.get('link'),
+            "last_status": "Monitoramento Iniciado"
+        }
+        save_watchlist(watchlist)
+        return "adicionado"
+
+# --- CONSULTA DE TRAMITAÇÕES (NOVO CORE) ---
+async def check_tramitacoes_watchlist() -> List[Dict]:
+    watchlist = load_watchlist()
+    updates = []
+    
+    async with httpx.AsyncClient(timeout=10) as client:
+        for uid, info in watchlist.items():
+            try:
+                novo_status = None
+                
+                # 1. Consulta CÂMARA
+                if info['casa'] == 'Câmara':
+                    url = f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{info['id_api']}/tramitacoes"
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        dados = resp.json().get('dados', [])
+                        if dados:
+                            # Pega a última tramitação
+                            last = dados[-1]
+                            novo_status = f"{last.get('dataHora', '')[:10]}: {last.get('despacho') or last.get('descricaoTramitacao')}"
+
+                # 2. Consulta SENADO
+                elif info['casa'] == 'Senado':
+                    url = f"https://legis.senado.leg.br/dadosabertos/materia/movimentacoes/{info['id_api']}"
+                    headers = {"Accept": "application/json"}
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        # Navegação no JSON complexo do Senado
+                        movs = data.get('MovimentacaoMateria', {}).get('Materia', {}).get('Tramitacoes', {}).get('Tramitacao', [])
+                        if isinstance(movs, dict): movs = [movs] # Normaliza se for item único
+                        
+                        if movs:
+                            last = movs[0] # Senado costuma mandar o mais recente primeiro ou ultimo, verificar ordem
+                            # No Senado, geralmente o array vem ordenado. Pegamos o mais recente.
+                            # Mas garantimos ordenação por data se necessário.
+                            desc = last.get('IdentificacaoTramitacao', {}).get('DescricaoSituacao') or last.get('TextoTramitacao')
+                            data_mov = last.get('DataTramitacao', '')
+                            novo_status = f"{data_mov}: {desc}"
+
+                # Lógica de Atualização
+                if novo_status and novo_status != info.get('last_status'):
+                    # Houve mudança!
+                    info['last_status'] = novo_status
+                    updates.append({
+                        "uid": uid,
+                        "titulo": f"{info['sigla']} {info['numero']}/{info['ano']}",
+                        "status": novo_status,
+                        "link": info['link'],
+                        "ementa": info['ementa']
+                    })
+            
+            except Exception as e:
+                print(f"Erro ao verificar {uid}: {e}")
+                continue
+    
+    # Salva os novos status no arquivo para não alertar repetido
+    if updates:
+        save_watchlist(watchlist)
+        
+    return updates
