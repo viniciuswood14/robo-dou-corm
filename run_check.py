@@ -1,5 +1,5 @@
-# Nome do arquivo: run_check.py
-# Versão: 17.0 (MODO SEGURANÇA - PARSER DESATIVADO)
+## Nome do arquivo: run_check.py
+# Versão: 18.0 (Modo Heartbeat + Horário Estendido)
 
 import asyncio
 import json
@@ -88,14 +88,15 @@ def save_state(state: Dict[str, List[str]]):
 
 async def check_and_process_dou(today_str: str):
     """
-    Função principal (MODO SEGURANÇA).
-    Não usa parser especializado, apenas extração bruta + IA.
+    Função principal (MODO SEGURANÇA + HEARTBEAT).
+    Avisa no Telegram mesmo se não encontrar nada.
     """
     print(f"--- Iniciando verificação do DOU para a data: {today_str} (SEM PARSER) ---")
     
     # 0. Configura IA
     if not GEMINI_API_KEY:
         print("Erro: GEMINI_API_KEY não encontrada.")
+        await send_telegram_message(f"⚠️ Erro Crítico: GEMINI_API_KEY não configurada.")
         return
     genai.configure(api_key=GEMINI_API_KEY)
     try:
@@ -111,6 +112,8 @@ async def check_and_process_dou(today_str: str):
     fallback_marker = f"FALLBACK_DONE_{today_str}"
     if fallback_marker in processed_zips_today:
         print("Modo Fallback já foi executado com sucesso hoje. Pulando.")
+        # Se quiser avisar que pulou pois já fez fallback:
+        # await send_telegram_message(f"ℹ️ DOU {today_str}: Verificação pulada (Fallback já realizado hoje).")
         return
 
     pubs_finais: List[Publicacao] = []
@@ -127,7 +130,9 @@ async def check_and_process_dou(today_str: str):
         all_zip_links = pick_zip_links_from_listing(html, listing_url, ["DO1", "DO2", "DO3"])
         
         if not all_zip_links:
-            print(f"Nenhum ZIP encontrado no InLabs para {today_str} ainda.")
+            msg = f"🔎 Monitoramento DOU ({today_str}): Nenhum arquivo ZIP disponível no InLabs no momento."
+            print(msg)
+            await send_telegram_message(msg)
             return 
 
         # Filtra novos
@@ -135,23 +140,25 @@ async def check_and_process_dou(today_str: str):
         new_zip_links = list(current_zip_set - processed_zips_today)
 
         if not new_zip_links:
-            print("Nenhuma nova edição (ZIP) encontrada.")
+            msg = f"✅ Monitoramento DOU ({today_str}): Nenhuma nova edição lançada desde a última verificação."
+            print(msg)
+            await send_telegram_message(msg)
             return
 
         print(f"Encontrados {len(new_zip_links)} novos arquivos ZIP.")
+        await send_telegram_message(f"📥 Baixando {len(new_zip_links)} novos arquivos ZIP do DOU...")
         
         # Processa ZIPs (Extração Bruta)
         all_new_xml_blobs = []
         for zurl in new_zip_links:
             print(f"Baixando {zurl}...")
             zb = await download_zip(client, zurl)
-            
-            # --- PARSER DESATIVADO AQUI ---
-            # Apenas extraímos o XML bruto para garantir que nada seja filtrado por erro de layout
             all_new_xml_blobs.extend(extract_xml_from_zip(zb))
         
         if not all_new_xml_blobs:
-            print("ZIPs vazios ou sem conteúdo relevante.")
+            msg = f"⚠️ Monitoramento DOU ({today_str}): ZIPs baixados, mas parecem vazios ou sem XML."
+            print(msg)
+            await send_telegram_message(msg)
             state[today_str] = list(current_zip_set)
             save_state(state)
             return
@@ -196,6 +203,7 @@ async def check_and_process_dou(today_str: str):
 
     except Exception as e:
         print(f"⚠️ Erro no InLabs: {e}")
+        # await send_telegram_message(f"⚠️ Erro de conexão InLabs: {str(e)[:200]}")
         usou_fallback = True
         
     finally:
@@ -204,6 +212,7 @@ async def check_and_process_dou(today_str: str):
     # --- TENTATIVA 2: FALLBACK (Se InLabs falhou) ---
     if usou_fallback and executar_fallback:
         print(">>> Iniciando Modo de Redundância (Fallback)...")
+        await send_telegram_message("⚠️ InLabs instável. Iniciando busca redundante (Fallback)...")
         try:
             res_fallback = await executar_fallback(today_str, [])
             
@@ -226,24 +235,30 @@ async def check_and_process_dou(today_str: str):
                 current_list.append(fallback_marker)
                 state[today_str] = current_list
             else:
-                print("Fallback rodou mas não encontrou nada relevante.")
+                msg = "⚠️ Fallback: Busca realizada, mas nada relevante encontrado."
+                print(msg)
+                await send_telegram_message(msg)
 
         except Exception as ef:
             print(f"Erro CRÍTICO: Falha também no Fallback: {ef}")
+            await send_telegram_message(f"❌ Erro Crítico Total (InLabs + Fallback): {ef}")
             return
 
     # --- ANÁLISE COM IA (Todas as publicações) ---
     if not pubs_finais:
         if sucesso_inlabs: save_state(state)
-        print("Nenhuma publicação relevante encontrada.")
+        msg = f"ℹ️ Monitoramento DOU ({today_str}): Arquivos processados, mas nenhuma matéria passou pelos filtros de Keywords."
+        print(msg)
+        await send_telegram_message(msg)
         return
 
     print(f"Enviando {len(pubs_finais)} matérias para análise da IA...")
+    # Opcional: Avisar que está analisando
+    # await send_telegram_message(f"🧠 Analisando {len(pubs_finais)} matérias com IA...")
     
     pubs_ready = []
     tasks = []
 
-    # Como desligamos o parser, TODAS as pubs passam pela IA se tiverem hit de keyword/tag
     for p in pubs_finais:
         prompt_to_use = GEMINI_MASTER_PROMPT
         if p.is_mpo_navy_hit:
@@ -269,10 +284,12 @@ async def check_and_process_dou(today_str: str):
 
     if not pubs_ready:
         if sucesso_inlabs: save_state(state)
-        print("IA filtrou tudo o que não era relevante. Nada a enviar.")
+        msg = f"🧠 IA Finalizada: Todas as matérias foram descartadas por falta de relevância/impacto."
+        print(msg)
+        await send_telegram_message(msg)
         return
 
-    # --- ENVIO TELEGRAM ---
+    # --- ENVIO TELEGRAM (POSIIVO) ---
     texto_zap = monta_whatsapp(pubs_ready, today_str)
     
     header = f"Alerta de Publicações - DOU ({today_str})\n"
@@ -300,7 +317,7 @@ async def main_loop():
     pac_check_done = False
     last_day = None
     
-    print("--- Robô Integrado (Safety Mode) Iniciado ---")
+    print("--- Robô Integrado (Safety Mode + Heartbeat) Iniciado ---")
 
     while True:
         agora = datetime.now(TZ_BRASILIA)
@@ -315,14 +332,16 @@ async def main_loop():
             last_day = hoje_str
             print(f"*** Novo dia: {hoje_str} ***")
 
-        # Horário de expediente (05h às 23h)
-        if 5 <= agora.hour < 23:
+        # Horário de expediente EXPANDIDO (04h às 23h59)
+        # Horário de expediente (04h às 23h59)
+        if 4 <= agora.hour <= 23:
             
             # 1. DOU (Roda a cada 10 min)
             try:
                 await check_and_process_dou(hoje_str)
             except Exception as e:
                 print(f"Erro no loop DOU: {e}")
+                await send_telegram_message(f"❌ Erro Loop DOU: {e}")
 
             is_weekday = agora.weekday() < 5
 
