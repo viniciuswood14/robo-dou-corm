@@ -249,12 +249,9 @@ def process_grouped_materia(
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
     
-    # [CORREÇÃO CRÍTICA V17.1]
-    # Identifica se é um órgão central de orçamento (MPO, Fazenda, Gestão, Presidência)
+    # 1. Filtro de Segurança para não deletar MPO
     is_central_budget_organ = any(x in organ_lower for x in ["planejamento", "orçamento", "fazenda", "gestão", "economia", "presidência"])
     
-    # Só aplica o filtro de exclusão (Exército/Aeronáutica) se NÃO for um órgão central.
-    # Isso impede que Portarias do MPO (como a 499) sejam deletadas só porque citam o Exército.
     if not is_central_budget_organ:
         if "comando da aeronáutica" in organ_lower or "comando do exército" in organ_lower:
             return None
@@ -263,7 +260,16 @@ def process_grouped_materia(
     body = main_article.find("body")
     if not body: return None
         
-    act_type = norm(body.find("Identifica").get_text(strip=True) if body.find("Identifica") else "")
+    # [CORREÇÃO CRÍTICA V17.2] - Fallback para Identifica Vazio
+    # O XML do MPO muitas vezes traz <Identifica /> vazio, mas o título está no atributo 'name'
+    identifica_node = body.find("Identifica")
+    act_type = norm(identifica_node.get_text(strip=True)) if identifica_node else ""
+    
+    if not act_type:
+        # Tenta pegar do atributo 'name' ou 'artType' do XML se o Identifica for nulo
+        act_type = norm(main_article.get("name", "")) or norm(main_article.get("artType", "Ato Administrativo"))
+    
+    # Se mesmo assim for vazio, aí sim retornamos (segurança), mas agora é difícil acontecer
     if not act_type: return None
     
     summary = norm(body.find("Ementa").get_text(strip=True) if body.find("Ementa") else "")
@@ -279,28 +285,37 @@ def process_grouped_materia(
     clean_text_for_ia = ""
     is_mpo_navy_hit_flag = False
     
+    # Verifica Tags da Marinha (Prioridade Máxima solicitada pelo usuário)
+    # Procuramos as chaves (ex: 52131, 52931) no texto completo
+    found_tags = []
+    if MPO_NAVY_TAGS:
+        for code, desc in MPO_NAVY_TAGS.items():
+            # Procura o código exato (ex: 52931)
+            if code in search_content_lower:
+                found_tags.append(f"{code} ({desc})")
+    
     if "DO1" in section:
-        # Se for órgão central (MPO/Fazenda)
         if is_central_budget_organ:
-            # 1. Procura códigos/nomes da Marinha e Defesa
-            found_navy_codes = [code for code in MPO_NAVY_TAGS if code.lower() in search_content_lower]
-            found_names = any(n in search_content_lower for n in ["comando da marinha", "fundo naval", "defesa", "amazul"])
-            
-            if found_navy_codes or found_names:
+            # 1. Se achou TAGs da Marinha (Fundo Naval, DGMM, etc)
+            if found_tags:
                 is_relevant = True
                 is_mpo_navy_hit_flag = True
-                reason = "Ato Financeiro/Orçamentário com impacto potencial na Marinha/Defesa."
+                tags_str = ", ".join(found_tags[:3])
+                reason = f"Ato do MPO/Fazenda com impacto direto nas UGs: {tags_str}..."
             
-            # [CORREÇÃO V17.1 - REDE DE SEGURANÇA]
-            # Se for "Crédito Suplementar" ou "Abre aos Orçamentos", captura SEMPRE.
-            # Motivo: As vezes a palavra "Marinha" está num anexo que o XML separou, 
-            # mas não podemos perder a portaria de crédito.
-            elif "crédito suplementar" in search_content_lower or "abre aos orçamentos" in search_content_lower or "crédito especial" in search_content_lower:
+            # 2. Busca por nomes por extenso (Redundância)
+            elif any(n in search_content_lower for n in ["comando da marinha", "fundo naval", "defesa", "amazul"]):
+                is_relevant = True
+                is_mpo_navy_hit_flag = True
+                reason = "Ato Financeiro/Orçamentário com menção nominal à Marinha/Defesa."
+            
+            # 3. Rede de Segurança para Créditos
+            elif "crédito suplementar" in search_content_lower or "abre aos orçamentos" in search_content_lower:
                 is_relevant = True
                 is_mpo_navy_hit_flag = True
                 reason = "Ato de Crédito Orçamentário (Captura Preventiva)."
 
-        # Keywords de Interesse Direto (Para qualquer órgão)
+        # Keywords Genéricas (Se não caiu nos filtros acima)
         if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw.lower() in search_content_lower:
@@ -308,11 +323,10 @@ def process_grouped_materia(
                     reason = f"Menção a termo chave: '{kw}'."
                     break
         
-        # Keywords de Orçamento Genérico (Monitoramento amplo)
         if not is_relevant and is_central_budget_organ:
             if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
-                reason = "Ato orçamentário geral (sem menção explícita à MB identificada por keyword)."
+                reason = "Ato orçamentário geral (sem menção explícita à MB detectada)."
 
     elif "DO2" in section:
         try: soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
