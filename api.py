@@ -1,5 +1,5 @@
 # Nome do arquivo: api.py
-# Versão: 16.1.0 (Versão Estável - Fallback Robusto e Formatação Unificada)
+# Versão: 17.0 (Versão de Segurança - Parser Desativado + Funcionalidades Novas)
 
 from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,13 +27,20 @@ except ImportError:
 import numpy as np
 try:
     from orcamentobr import despesa_detalhada
-    from check_pac import update_pac_historical_cache
+    from check_pac import update_pac_historical_cache, HISTORICAL_CACHE_PATH
 except ImportError:
     pass
 
 # --- [LEGISLATIVO] ---
 try:
-    from check_legislativo import check_and_process_legislativo
+    # Importa as funções de monitoramento e busca
+    from check_legislativo import (
+        check_and_process_legislativo, 
+        toggle_tracking, 
+        load_watchlist, 
+        check_tramitacoes_watchlist, 
+        find_proposition
+    )
 except ImportError:
     pass
 
@@ -43,42 +50,11 @@ try:
 except ImportError:
     executar_fallback = None
 
-# --- [NOVO PARSER MPO] ---
-try:
-    import mb_portaria_parser
-except ImportError:
-    print("Aviso: 'mb_portaria_parser.py' não encontrado. Usando apenas análise genérica.")
-    mb_portaria_parser = None
-
-# Adicionar logo após os outros imports do PAC no api.py
-from check_pac import HISTORICAL_CACHE_PATH
-
-# ... (outras importações)
-try:
-    from orcamentobr import despesa_detalhada
-    # Adicione HISTORICAL_CACHE_PATH aqui:
-    from check_pac import update_pac_historical_cache, HISTORICAL_CACHE_PATH 
-except ImportError:
-    pass
-
-# No api.py (imports)
-try:
-    # Importe as novas funções
-    from check_legislativo import toggle_tracking, load_watchlist, check_tramitacoes_watchlist
-except ImportError:
-    pass
-
-try:
-    # Adicione find_proposition aqui
-    from check_legislativo import toggle_tracking, load_watchlist, check_tramitacoes_watchlist, find_proposition
-except ImportError:
-    pass
-
 # =====================================================================================
 # API SETUP
 # =====================================================================================
 
-app = FastAPI(title="Robô DOU/Valor API - v16.1.0")
+app = FastAPI(title="Robô DOU/Valor API - v17.0 (Safety Mode)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,10 +66,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    print(">>> SISTEMA UNIFICADO INICIADO: API + SITE + ROBÔ <<<")
+    print(">>> SISTEMA UNIFICADO INICIADO (MODO SEGURANÇA: PARSER DESATIVADO) <<<")
 
-    # --- [NOVO BLOCO] Verificação Inicial do Cache PAC ---
+    # --- Verificação Inicial do Cache PAC ---
     try:
+        # Verifica se o arquivo de cache existe, senão cria em background
         if not os.path.exists(HISTORICAL_CACHE_PATH):
             print("⚠️ Cache do PAC não encontrado. Iniciando geração inicial em background...")
             asyncio.create_task(update_pac_historical_cache())
@@ -101,8 +78,8 @@ async def startup_event():
             print("✅ Cache do PAC já existe.")
     except Exception as e:
         print(f"Erro ao verificar cache PAC: {e}")
-    # -----------------------------------------------------
 
+    # --- Inicialização do Loop do Robô ---
     try:
         from run_check import main_loop
         asyncio.create_task(main_loop())
@@ -141,21 +118,21 @@ NAMES_TO_TRACK = sorted(list(set(config.get("NAMES_TO_TRACK", []))), key=str.low
 ANNOTATION_POSITIVE_GENERIC = config.get("ANNOTATION_POSITIVE_GENERIC", "")
 ANNOTATION_NEGATIVE = config.get("ANNOTATION_NEGATIVE", "")
 
-# PROMPTS
+# PROMPTS (Ajustados para análise via IA direta)
 GEMINI_MASTER_PROMPT = """
 Você é um analista de orçamento e finanças do Comando da Marinha do Brasil.
 Sua tarefa é ler a publicação do DOU e escrever UMA frase curta (max 2 linhas) para relatório WhatsApp.
-Critérios:
-1. Orçamentário: Impacto (Crédito, LME, Fontes)? Afeta Marinha?
-2. Pessoal: Quem/Cargo.
-3. Normativo: Qual regra.
-4. Trivial: "Sem impacto direto."
+Foque em: Créditos Suplementares, Alteração de Limites (LME), Bloqueios, Fontes de Recursos e Pessoal Chave.
+Se for trivial, diga: "Sem impacto direto."
 """
 
 GEMINI_MPO_PROMPT = """
-Você é analista orçamentário da Marinha. Esta portaria JÁ FOI marcada como relevante.
-Diga: 1. Tipo alteração. 2. Quem é afetado. 3. Valores (se explícitos).
-Responda formalmente.
+Você é analista orçamentário da Marinha. Esta é uma portaria do MPO/Fazenda identificada por palavras-chave.
+Identifique no texto:
+1. Se há Suplementação ou Cancelamento para a Defesa (UG 52xxx) ou Marinha.
+2. Valores envolvidos (se explícitos).
+3. Se é alteração de Cronograma Financeiro ou Limites.
+Responda de forma direta e técnica.
 """
 
 GEMINI_VALOR_PROMPT = """
@@ -178,7 +155,7 @@ class Publicacao(BaseModel):
     section: Optional[str] = None
     clean_text: Optional[str] = None
     is_mpo_navy_hit: bool = False
-    is_parsed_mpo: bool = False  # Flag indicando origem do Parser Especializado
+    is_parsed_mpo: bool = False # Mantido como False fixo nesta versão
 
 class ProcessResponse(BaseModel):
     date: str
@@ -207,10 +184,6 @@ def norm(s: Optional[str]) -> str:
     return _ws.sub(" ", s).strip()
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
-    """
-    Gera o relatório do WhatsApp.
-    Integra o MPO Parser dentro da Seção 1 com formato padrão.
-    """
     meses_pt = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"}
     try:
         dt = datetime.fromisoformat(when)
@@ -223,27 +196,17 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         lines.append("— Sem ocorrências para os critérios informados —")
         return "\n".join(lines)
 
-    # Agrupa TUDO por seção
     pubs_by_section: Dict[str, List[Publicacao]] = {}
     
     for p in pubs:
-        # Se veio do Parser MPO e não tem seção definida, joga na DO1
         sec = p.section or "DOU"
-        
-        # Cria chaves de ordenação (Seção 1 -> 2 -> 3)
-        if "DO1" in sec or "Seção 1" in sec: 
-            sec_key = "1_DO1"
-        elif "DO2" in sec or "Seção 2" in sec: 
-            sec_key = "2_DO2"
-        elif "DO3" in sec or "Seção 3" in sec: 
-            sec_key = "3_DO3"
-        else: 
-            sec_key = "4_OUTROS"
-        
+        if "DO1" in sec or "Seção 1" in sec: sec_key = "1_DO1"
+        elif "DO2" in sec or "Seção 2" in sec: sec_key = "2_DO2"
+        elif "DO3" in sec or "Seção 3" in sec: sec_key = "3_DO3"
+        else: sec_key = "4_OUTROS"
         pubs_by_section.setdefault(sec_key, []).append(p)
 
     for sec_key in sorted(pubs_by_section.keys()):
-        # Define o título visual da seção
         if "DO1" in sec_key: label = "🔰 Seção 1"
         elif "DO2" in sec_key: label = "🔰 Seção 2"
         elif "DO3" in sec_key: label = "🔰 Seção 3"
@@ -255,24 +218,13 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
         for p in pubs_by_section[sec_key]:
             lines.append(f"▶️ {p.organ or 'Órgão'}")
             lines.append(f"📌 {p.type or 'Ato'}")
+            if p.summary: lines.append(f"_{p.summary}_") 
             
-            # Resumo (Ementa) - Em itálico
-            if p.summary:
-                lines.append(f"_{p.summary}_") 
-            
-            # Análise (IA ou Parser Contábil)
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
+            if "erro" in reason.lower() and "ia" in reason.lower(): prefix = "⚠️"
             
-            if "erro" in reason.lower() and "ia" in reason.lower():
-                prefix = "⚠️"
-            
-            # Se for parser MPO, o texto já vem formatado com quebras de linha
-            if p.is_parsed_mpo:
-                lines.append(f"{prefix}\n{reason}")
-            else:
-                lines.append(f"{prefix} {reason}")
-
+            lines.append(f"{prefix} {reason}")
             lines.append("")
 
     return "\n".join(lines)
@@ -287,53 +239,7 @@ def monta_valor_whatsapp(pubs: List[ValorPublicacao], when: str) -> str:
     return "\n".join(lines)
 
 # =====================================================================================
-# INTEGRAÇÃO DO PARSER MPO
-# =====================================================================================
-def run_mpo_parser_on_zip(zip_bytes: bytes) -> List[Publicacao]:
-    """
-    Roda o parser especializado no ZIP em memória.
-    """
-    if not mb_portaria_parser:
-        return []
-    
-    results = []
-    try:
-        # Usa BytesIO para simular arquivo
-        zip_io = io.BytesIO(zip_bytes)
-        
-        # Chama a função do parser
-        agg, pid_to_hint = mb_portaria_parser.parse_zip_in_memory(zip_io)
-        
-        for pid, rows in agg.items():
-            hint = pid_to_hint.get(pid, "Ato orçamentário MPO")
-            
-            # O parser 'render_whatsapp_block' deve retornar apenas os valores/saldo
-            analysis_text = mb_portaria_parser.render_whatsapp_block(pid, hint, rows)
-            
-            # Formatação do Título
-            type_str = pid
-            if "PORTARIA" not in pid.upper():
-                type_str = f"PORTARIA GM/MPO Nº {pid}"
-
-            pub = Publicacao(
-                organ="Ministério do Planejamento e Orçamento",
-                type=type_str,
-                summary=hint,
-                raw=analysis_text,
-                relevance_reason=analysis_text,
-                section="DO1", # Força Seção 1
-                is_mpo_navy_hit=True,
-                is_parsed_mpo=True 
-            )
-            results.append(pub)
-            
-    except Exception as e:
-        print(f"Erro no Parser MPO: {e}")
-    
-    return results
-
-# =====================================================================================
-# CLASSIFICAÇÃO INICIAL (LEGADO PARA OUTROS ORGÃOS)
+# CLASSIFICAÇÃO GENÉRICA (KEYWORDS + XML)
 # =====================================================================================
 def process_grouped_materia(
     main_article: BeautifulSoup,
@@ -368,29 +274,33 @@ def process_grouped_materia(
     is_mpo_navy_hit_flag = False
     
     if "DO1" in section:
-        is_mpo = MPO_ORG_STRING in organ_lower
+        # Lógica para MPO / Fazenda
+        is_mpo = any(x in organ_lower for x in ["planejamento", "orçamento", "fazenda", "gestão", "economia"])
         
-        # MPO Genérico (se não foi pego pelo parser especializado)
         if is_mpo:
+            # Procura códigos da Marinha no texto bruto
             found_navy_codes = [code for code in MPO_NAVY_TAGS if code.lower() in search_content_lower]
-            if found_navy_codes:
+            # Procura menção por extenso
+            found_names = any(n in search_content_lower for n in ["comando da marinha", "fundo naval", "defesa", "amazul"])
+            
+            if found_navy_codes or found_names:
                 is_relevant = True
                 is_mpo_navy_hit_flag = True
-                reason = "Ato do MPO com menção a códigos da Marinha (Texto genérico)."
+                reason = "Ato Financeiro/Orçamentário com impacto potencial na Marinha/Defesa."
 
         # Keywords de Interesse Direto
         if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
-                if kw in search_content_lower:
+                if kw.lower() in search_content_lower:
                     is_relevant = True
-                    reason = f"Há menção específica à TAG: '{kw}'."
+                    reason = f"Menção a termo chave: '{kw}'."
                     break
         
-        # Keywords de Orçamento
-        if not is_relevant and (is_mpo or "ministério da fazenda" in organ.lower()):
+        # Keywords de Orçamento Genérico (Monitorar, mas com prioridade menor)
+        if not is_relevant and is_mpo:
             if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
-                reason = ANNOTATION_NEGATIVE or "Ato orçamentário, mas sem impacto direto explícito."
+                reason = "Ato orçamentário geral (sem menção explícita à MB identificada por keyword)."
 
     elif "DO2" in section:
         try: soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
@@ -403,21 +313,21 @@ def process_grouped_materia(
         for term in TERMS_AND_ACRONYMS_S2:
             if term.lower() in clean_search_content_lower:
                 is_relevant = True
-                reason = f"Ato de pessoal (Seção 2): menção a '{term}'."
+                reason = f"Pessoal: Menção a '{term}'."
                 break
         
         if not is_relevant:
             for name in NAMES_TO_TRACK:
                 if name.lower() in clean_search_content_lower:
                     is_relevant = True
-                    reason = f"Ato de pessoal (Seção 2): menção a '{name}'."
+                    reason = f"Pessoal: Menção a '{name}'."
                     break
     
     if custom_keywords:
         for kw in custom_keywords:
             if kw and kw.lower() in search_content_lower:
                 is_relevant = True
-                reason = f"Há menção à palavra-chave personalizada: '{kw}'."
+                reason = f"Keyword personalizada: '{kw}'."
                 break
             
     if is_relevant:
@@ -479,8 +389,6 @@ def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections:
     soup = BeautifulSoup(html, "html.parser")
     links: List[str] = []
     wanted = set(s.strip().upper() for s in only_sections) if only_sections else {"DO1"}
-    print(f"DEBUG: Procurando seções {wanted} em {base_url_for_rel}")
-
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         text = (a.get_text() or "").strip().upper()
@@ -493,7 +401,6 @@ def pick_zip_links_from_listing(html: str, base_url_for_rel: str, only_sections:
                     is_match = True
                     break
             if is_match:
-                print(f"DEBUG: ZIP Encontrado: {full_url}")
                 links.append(full_url)
     return sorted(list(set(links)))
 
@@ -533,7 +440,7 @@ async def processar_inlabs(
     usou_fallback = False
     erro_principal = ""
 
-    print(f">>> Tentando InLabs (Principal) para {data}...")
+    print(f">>> Tentando InLabs (Modo Safety - Sem Parser MPO) para {data}...")
     try:
         client = await inlabs_login_and_get_session()
         try:
@@ -547,16 +454,10 @@ async def processar_inlabs(
                 print(f"Baixando {zurl}...")
                 zb = await download_zip(client, zurl)
                 
-                # --- PASSO A: RODA O PARSER ESPECIALIZADO DE PORTARIAS ---
-                if mb_portaria_parser:
-                    print("Rodando Parser MPO especializado...")
-                    mpo_pubs = run_mpo_parser_on_zip(zb)
-                    pubs_final.extend(mpo_pubs)
-                
-                # --- PASSO B: RODA O PARSER GENÉRICO (XML) ---
-                all_xml_blobs = extract_xml_from_zip(zb)
+                # --- EXTRAÇÃO DIRETA (SEM PARSER ESPECIALIZADO) ---
+                all_new_xml_blobs = extract_xml_from_zip(zb)
                 materias: Dict[str, Dict[str, Any]] = {}
-                for blob in all_xml_blobs:
+                for blob in all_new_xml_blobs:
                     try:
                         soup = BeautifulSoup(blob, "lxml-xml")
                         article = soup.find("article")
@@ -575,10 +476,7 @@ async def processar_inlabs(
                     if content["main_article"]:
                         publication = process_grouped_materia(content["main_article"], content["full_text"], custom_keywords)
                         if publication:
-                            # Evita duplicata se o Parser Especializado já pegou
-                            is_dup = any(p.type == publication.type for p in pubs_final if p.is_parsed_mpo)
-                            if not is_dup:
-                                pubs_final.append(publication)
+                            pubs_final.append(publication)
         finally:
             await client.aclose()
 
@@ -587,9 +485,7 @@ async def processar_inlabs(
         erro_principal = str(e)
         usou_fallback = True
 
-    # --- TENTATIVA 2: FALLBACK ---
     if usou_fallback and executar_fallback:
-        print(f">>> Acionando Fallback (in.gov.br) para {data}...")
         try:
             fb_results = await executar_fallback(data, custom_keywords)
             for item in fb_results:
@@ -600,9 +496,8 @@ async def processar_inlabs(
                 ))
         except Exception as e_fb:
             print(f"Erro no Fallback: {e_fb}")
-            if not pubs_final: raise HTTPException(500, detail=f"Erro InLabs ({erro_principal}) E Erro Fallback ({e_fb})")
 
-    # --- Deduplicação e Retorno ---
+    # Deduplicação
     seen: Set[str] = set()
     merged: List[Publicacao] = []
     for p in pubs_final:
@@ -612,12 +507,10 @@ async def processar_inlabs(
             merged.append(p)
 
     texto = monta_whatsapp(merged, data)
-    if usou_fallback: texto = "⚠️ *Aviso: Sistema InLabs indisponível. Dados via Portal Público.*\n\n" + texto
-
     return ProcessResponse(date=data, count=len(merged), publications=merged, whatsapp_text=texto)
 
 # =====================================================================================
-# /processar-dou-ia (COM IA + MPO INTEGRADO)
+# /processar-dou-ia (COM IA)
 # =====================================================================================
 @app.post("/processar-dou-ia", response_model=ProcessResponse)
 async def processar_dou_ia(
@@ -629,19 +522,14 @@ async def processar_dou_ia(
     try: model = genai.GenerativeModel("gemini-2.5-flash") 
     except Exception as e: raise HTTPException(500, detail=f"Falha IA: {e}")
 
-    # Chama o fluxo padrão (que já traz o MPO parseado)
+    # Chama o fluxo padrão (agora sem parser MPO)
     res_padrao = await processar_inlabs(data, sections, keywords_json)
     
     pubs_analisadas = []
     tasks = []
     
     for p in res_padrao.publications:
-        # Se veio do Parser Especializado, NÃO gasta token de IA, já está pronto
-        if p.is_parsed_mpo:
-            pubs_analisadas.append(p)
-            continue
-            
-        # Se for publicação genérica, manda pra IA
+        # Como desligamos o parser, tudo vai para a IA se tiver flag relevante
         prompt = GEMINI_MPO_PROMPT if p.is_mpo_navy_hit else GEMINI_MASTER_PROMPT
         tasks.append(analyze_single_pub(p, model, prompt))
 
@@ -654,6 +542,7 @@ async def processar_dou_ia(
 
 async def analyze_single_pub(pub: Publicacao, model, prompt_template):
     try:
+        # Aumentamos o texto para a IA ter contexto total
         analysis = await get_ai_analysis(pub.clean_text or pub.raw, model, prompt_template)
         if analysis:
             if "sem impacto" in analysis.lower() and not pub.is_mpo_navy_hit: return None
@@ -663,7 +552,8 @@ async def analyze_single_pub(pub: Publicacao, model, prompt_template):
 
 async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel, prompt_template: str) -> Optional[str]:
     try:
-        prompt = f"{prompt_template}\n\n{clean_text[:8000]}"
+        # Trunca para garantir que cabe no prompt, mas 12k chars é bastante
+        prompt = f"{prompt_template}\n\n{clean_text[:12000]}"
         response = await model.generate_content_async(prompt)
         return norm(response.text)
     except Exception as e:
@@ -671,7 +561,7 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel, prompt_
         return None
 
 # =====================================================================================
-# OUTROS ENDPOINTS (Valor, Fallback Teste, PAC, Legislativo)
+# ENDPOINTS LEGISLATIVO & OUTROS
 # =====================================================================================
 
 # Endpoint para Adicionar/Remover do Monitoramento
@@ -686,24 +576,19 @@ class TrackRequest(BaseModel):
 
 @app.post("/legislativo/track")
 async def track_proposition(item: TrackRequest):
-    # Converte Pydantic model para dict
     res = toggle_tracking(item.dict())
     return {"status": "ok", "action": res}
 
-# Endpoint para Ler a Watchlist (Dashboard)
 @app.get("/legislativo/watchlist")
 async def get_watchlist():
-    # Retorna a lista atual salva
     wl = load_watchlist()
     return list(wl.values())
 
-# Endpoint para Forçar Atualização (Botão "Atualizar Status")
 @app.post("/legislativo/force-update")
 async def force_update_legis():
     updates = await check_tramitacoes_watchlist()
     return {"updates_found": len(updates), "data": updates}
 
-# Modelo para a busca manual
 class ManualSearch(BaseModel):
     casa: str
     sigla: str
@@ -712,20 +597,14 @@ class ManualSearch(BaseModel):
 
 @app.post("/legislativo/add-manual")
 async def add_manual_proposition(search: ManualSearch):
-    # 1. Busca os dados reais na API oficial
     found_item = await find_proposition(search.casa, search.sigla, search.numero, search.ano)
-    
     if not found_item:
-        return {"status": "error", "message": "Proposição não encontrada nas bases oficiais. Verifique a sigla e o número."}
-    
-    # 2. Adiciona à watchlist
+        return {"status": "error", "message": "Proposição não encontrada nas bases oficiais."}
     toggle_tracking(found_item)
-    
-    return {"status": "ok", "message": f"Projeto {found_item['tipo']} {found_item['numero']} localizado e adicionado!", "data": found_item}
+    return {"status": "ok", "message": f"Projeto {found_item['tipo']} {found_item['numero']} adicionado!", "data": found_item}
 
 @app.post("/processar-valor-ia", response_model=ProcessResponseValor)
 async def processar_valor_ia(data: str = Form(...)):
-    # Importa a função do check_valor.py ou api.py (definida acima)
     from api import run_valor_analysis, monta_valor_whatsapp
     pubs_list, _ = await run_valor_analysis(data, use_state=False)
     pubs_model = [ValorPublicacao(**p) for p in pubs_list]
@@ -833,7 +712,6 @@ async def get_pac_historical():
             with open(HISTORICAL_CACHE_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
         else:
-            # Se não existir, tenta gerar agora ou retorna vazio
             return {"labels": [], "datasets": []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
