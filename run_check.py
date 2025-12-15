@@ -1,5 +1,5 @@
 # Nome do arquivo: run_check.py
-# Versão: 16.0.0 (Com Redundância + Parser MPO Especializado)
+# Versão: 17.0 (MODO SEGURANÇA - PARSER DESATIVADO)
 
 import asyncio
 import json
@@ -23,13 +23,11 @@ try:
         download_zip,
         extract_xml_from_zip,
         process_grouped_materia,
-        run_mpo_parser_on_zip, # <--- NOVA IMPORTAÇÃO
         get_ai_analysis,
         monta_whatsapp,
         GEMINI_API_KEY,
         GEMINI_MASTER_PROMPT,
         GEMINI_MPO_PROMPT,
-        MPO_ORG_STRING,
         Publicacao
     )
 except ImportError as e:
@@ -39,23 +37,22 @@ except ImportError as e:
 # Importa o sender do Telegram
 try:
     from telegram import send_telegram_message
-except ImportError as e:
-    print(f"Erro: Falha ao importar 'telegram.py'. Detalhe: {e}")
-    raise
+except ImportError:
+    # Mock para não quebrar se o arquivo não existir ou falhar
+    async def send_telegram_message(msg):
+        print(f"[TELEGRAM MOCK] {msg}")
 
 # Importa a função do robô Valor
 try:
     from check_valor import check_and_process_valor
-except ImportError as e:
-    print(f"Erro: Falha ao importar 'check_valor.py'. Detalhe: {e}")
-    raise
+except ImportError:
+    pass
 
 # Importa a função do robô PAC
 try:
     from check_pac import check_and_process_pac
-except ImportError as e:
-    print(f"Erro: Falha ao importar 'check_pac.py'. Detalhe: {e}")
-    raise
+except ImportError:
+    pass
 
 # --- [IMPORTAÇÃO FALLBACK] ---
 try:
@@ -91,10 +88,10 @@ def save_state(state: Dict[str, List[str]]):
 
 async def check_and_process_dou(today_str: str):
     """
-    Função principal com REDUNDÂNCIA e PARSER MPO.
-    Tenta InLabs (XML). Se falhar, tenta Site Público (Fallback).
+    Função principal (MODO SEGURANÇA).
+    Não usa parser especializado, apenas extração bruta + IA.
     """
-    print(f"--- Iniciando verificação do DOU para a data: {today_str} ---")
+    print(f"--- Iniciando verificação do DOU para a data: {today_str} (SEM PARSER) ---")
     
     # 0. Configura IA
     if not GEMINI_API_KEY:
@@ -113,7 +110,7 @@ async def check_and_process_dou(today_str: str):
     # Flag para saber se usamos o fallback hoje para não repetir
     fallback_marker = f"FALLBACK_DONE_{today_str}"
     if fallback_marker in processed_zips_today:
-        print("Modo Fallback já foi executado com sucesso hoje. Pulando para evitar duplicidade.")
+        print("Modo Fallback já foi executado com sucesso hoje. Pulando.")
         return
 
     pubs_finais: List[Publicacao] = []
@@ -143,29 +140,23 @@ async def check_and_process_dou(today_str: str):
 
         print(f"Encontrados {len(new_zip_links)} novos arquivos ZIP.")
         
-        # Processa ZIPs
+        # Processa ZIPs (Extração Bruta)
         all_new_xml_blobs = []
         for zurl in new_zip_links:
             print(f"Baixando {zurl}...")
             zb = await download_zip(client, zurl)
             
-            # --- [NOVO] PASSO A: RODA O PARSER ESPECIALIZADO DE PORTARIAS MPO ---
-            # Processa o ZIP em memória para extrair tabelas de orçamento com precisão
-            mpo_hits = run_mpo_parser_on_zip(zb)
-            if mpo_hits:
-                print(f"   -> Parser MPO encontrou {len(mpo_hits)} portarias detalhadas.")
-                pubs_finais.extend(mpo_hits)
-
-            # --- PASSO B: EXTRAI XML PARA PARSER GENÉRICO ---
+            # --- PARSER DESATIVADO AQUI ---
+            # Apenas extraímos o XML bruto para garantir que nada seja filtrado por erro de layout
             all_new_xml_blobs.extend(extract_xml_from_zip(zb))
         
-        if not all_new_xml_blobs and not pubs_finais:
+        if not all_new_xml_blobs:
             print("ZIPs vazios ou sem conteúdo relevante.")
             state[today_str] = list(current_zip_set)
             save_state(state)
             return
 
-        # Agrupa e Filtra (Lógica Genérica)
+        # Agrupa e Filtra (Lógica Genérica de Keywords)
         materias = {}
         for blob in all_new_xml_blobs:
             try:
@@ -178,7 +169,7 @@ async def check_and_process_dou(today_str: str):
                     materias[materia_id] = {"main_article": None, "full_text": ""}
                 materias[materia_id]["full_text"] += (blob.decode("utf-8", errors="ignore") + "\n")
                 body = article.find("body")
-                if body and body.find("Identifica") and body.find("Identifica").get_text(strip=True):
+                if body and body.find("Identifica"):
                     materias[materia_id]["main_article"] = article
             except: continue
         
@@ -188,11 +179,7 @@ async def check_and_process_dou(today_str: str):
                     content["main_article"], content["full_text"], custom_keywords=[]
                 )
                 if publication:
-                    # Evita adicionar se o Parser Especializado já pegou (checagem básica por Tipo)
-                    # O Parser MPO marca pubs com is_parsed_mpo=True
-                    is_dup_mpo = any(p.type == publication.type for p in pubs_finais if p.is_parsed_mpo)
-                    if not is_dup_mpo:
-                        pubs_finais.append(publication)
+                    pubs_finais.append(publication)
 
         # Deduplicar Geral
         seen = set()
@@ -205,7 +192,6 @@ async def check_and_process_dou(today_str: str):
         pubs_finais = unique_pubs
         
         sucesso_inlabs = True
-        # Atualiza estado com os ZIPs processados
         state[today_str] = list(current_zip_set)
 
     except Exception as e:
@@ -236,7 +222,6 @@ async def check_and_process_dou(today_str: str):
                     )
                     pubs_finais.append(p)
                 
-                # Marca no estado que o fallback rodou
                 current_list = state.get(today_str, [])
                 current_list.append(fallback_marker)
                 state[today_str] = current_list
@@ -247,51 +232,44 @@ async def check_and_process_dou(today_str: str):
             print(f"Erro CRÍTICO: Falha também no Fallback: {ef}")
             return
 
-    # --- ANÁLISE COM IA (Inteligente) ---
+    # --- ANÁLISE COM IA (Todas as publicações) ---
     if not pubs_finais:
         if sucesso_inlabs: save_state(state)
         print("Nenhuma publicação relevante encontrada.")
         return
 
-    # Separa o que precisa de IA do que já está pronto (Parser MPO)
-    pubs_to_analyze = []
+    print(f"Enviando {len(pubs_finais)} matérias para análise da IA...")
+    
     pubs_ready = []
+    tasks = []
 
+    # Como desligamos o parser, TODAS as pubs passam pela IA se tiverem hit de keyword/tag
     for p in pubs_finais:
-        if p.is_parsed_mpo:
-            # Já vem analisado e formatado pelo parser especializado
+        prompt_to_use = GEMINI_MASTER_PROMPT
+        if p.is_mpo_navy_hit:
+            prompt_to_use = GEMINI_MPO_PROMPT
+        
+        texto_analise = p.clean_text if p.clean_text else p.raw
+        tasks.append(get_ai_analysis(texto_analise, model, prompt_to_use))
+
+    ai_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for p, ai_out in zip(pubs_finais, ai_results):
+        if isinstance(ai_out, Exception) or not ai_out:
+            p.relevance_reason = "⚠️ IA indisponível. Verifique manualmente."
             pubs_ready.append(p)
-        else:
-            pubs_to_analyze.append(p)
-
-    if pubs_to_analyze:
-        print(f"Enviando {len(pubs_to_analyze)} matérias genéricas para análise da IA...")
-        tasks = []
-        for p in pubs_to_analyze:
-            prompt_to_use = GEMINI_MASTER_PROMPT
-            if p.is_mpo_navy_hit:
-                prompt_to_use = GEMINI_MPO_PROMPT
+            continue
+        
+        # Filtro de relevância da IA
+        if "sem impacto direto" in ai_out.lower() and not p.is_mpo_navy_hit:
+            continue
             
-            texto_analise = p.clean_text if p.clean_text else p.raw
-            tasks.append(get_ai_analysis(texto_analise, model, prompt_to_use))
-
-        ai_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for p, ai_out in zip(pubs_to_analyze, ai_results):
-            if isinstance(ai_out, Exception) or not ai_out:
-                p.relevance_reason = "⚠️ IA indisponível. Verifique manualmente."
-                pubs_ready.append(p)
-                continue
-            
-            if "sem impacto direto" in ai_out.lower() and not p.is_mpo_navy_hit:
-                continue # Filtra irrelevantes
-                
-            p.relevance_reason = ai_out
-            pubs_ready.append(p)
+        p.relevance_reason = ai_out
+        pubs_ready.append(p)
 
     if not pubs_ready:
         if sucesso_inlabs: save_state(state)
-        print("IA filtrou tudo o que não era do MPO. Nada a enviar.")
+        print("IA filtrou tudo o que não era relevante. Nada a enviar.")
         return
 
     # --- ENVIO TELEGRAM ---
@@ -299,7 +277,7 @@ async def check_and_process_dou(today_str: str):
     
     header = f"Alerta de Publicações - DOU ({today_str})\n"
     if usou_fallback:
-        header += "⚠️ *Aviso: InLabs instável. Busca realizada via portal público.*\n"
+        header += "⚠️ *Aviso: Dados via portal público (InLabs instável).*\n"
     
     final_msg = header + "\n" + texto_zap
     
@@ -322,7 +300,7 @@ async def main_loop():
     pac_check_done = False
     last_day = None
     
-    print("--- Robô Integrado (DOU + Parser MPO + Fallback + Valor + PAC) Iniciado ---")
+    print("--- Robô Integrado (Safety Mode) Iniciado ---")
 
     while True:
         agora = datetime.now(TZ_BRASILIA)
@@ -337,7 +315,7 @@ async def main_loop():
             last_day = hoje_str
             print(f"*** Novo dia: {hoje_str} ***")
 
-        # [cite_start]Horário de expediente (05h às 23h) [cite: 1]
+        # Horário de expediente (05h às 23h)
         if 5 <= agora.hour < 23:
             
             # 1. DOU (Roda a cada 10 min)
