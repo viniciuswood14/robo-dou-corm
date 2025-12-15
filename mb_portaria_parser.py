@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Nome do arquivo: mb_portaria_parser.py
-Versão: 3.0 (Suporte a Portarias de Limites/Bloqueio e Linhas Diretas de UG)
-Descrição: Parser especializado para Portarias orçamentárias (GM, SOF, SE) do MPO.
+Versão: 4.0 (Granularidade de Ação e RP)
+Descrição: Parser orçamentário que extrai Ação (PT), RP e detalha Suplementação/Cancelamento.
 """
 from __future__ import annotations
 
@@ -11,25 +11,39 @@ import zipfile
 import io
 from xml.etree import ElementTree as ET
 from collections import defaultdict
-from typing import Dict, Iterable, List, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union, Optional
 
-# UGs da Marinha/Defesa (padrão)
+# --- CONFIGURAÇÃO DE INTERESSE ---
+
+# UGs da Marinha/Defesa (Filtro Principal)
 MB_UGS_DEFAULT = {
-    "52111", # Comando da Marinha (Algumas variações)
-    "52131", # Comando da Marinha
-    "52133", # Secretaria da Comissão Interministerial para os Recursos do Mar
+    "52111", "52121", "52131", # Comandos Militares
+    "52133", # SECIRM
     "52232", # CCCPM
     "52233", # AMAZUL
     "52931", # Fundo Naval
-    "52932", # Fundo de Desenvolvimento do Ensino Profissional Marítimo
-    "52000", # Ministério da Defesa (Administração Direta)
-    "52121", # Comando do Exército (Opcional, mas às vezes agrupado)
-    "52111"  # Comando da Aeronáutica (Opcional)
+    "52932", # FDEPM
+    "52000", # Ministério da Defesa
+    "52904"  # Fundo do MD (se houver)
+}
+
+# Mapeamento de Ações Estratégicas (Para dar nome aos bois)
+STRATEGIC_MAP = {
+    "123G": "PROSUB (Estaleiro)",
+    "123H": "PROSUB (Sub. Nuclear)",
+    "123I": "PROSUB (Sub. Convencional)",
+    "14T7": "PNM (Nuclear)",
+    "1N47": "PRONAPA (Patrulha)",
+    "2000": "Adm. Unidade",
+    "20X3": "Manutenção",
+    "00OQ": "Contribuições Internacionais",
+    "0Z00": "Reserva de Contingência",
+    "21A0": "Apprendiz",
+    "20GP": "Gestão e Política"
 }
 
 def _sanitize_html_content(html_str: str) -> str:
     if not html_str: return ""
-    # Remove atributos de namespace que quebram o ET.fromstring as vezes
     s = re.sub(r'\sxmlns="[^"]+"', '', html_str, count=1)
     s = s.replace("&nbsp;", " ").replace("&quot;", '"').replace("&apos;", "'")
     return s
@@ -38,68 +52,55 @@ def _html_to_text(html: str) -> str:
     if not html: return ""
     try:
         clean_html = _sanitize_html_content(html)
-        # Envolve em root para garantir XML válido
         root = ET.fromstring(f"<root>{clean_html}</root>")
         txt = " ".join(x.strip() for x in root.itertext() if x.strip())
         return re.sub(r"\s+", " ", txt)
-    except Exception:
-        # Fallback regex se o XML falhar
+    except:
         return re.sub(r"<[^>]+>", " ", html).strip()
 
 def _extract_header_hint(text: str) -> str:
+    """Tenta extrair o resumo/ementa da portaria."""
     if not text: return ""
-    
-    # Tentativas de capturar o objetivo da portaria
     patterns = [
         r"(Abre\s+ao?s?\s+Or(ç|c)amentos?[\s\S]*?vigente\.)",
-        r"(Adequa[\s\S]*?alterações\s+posteriores\.)",
-        r"(Altera\s+parcialmente\s+grupos[\s\S]*?vigente\.)",
-        r"(Ajusta\s+os\s+valores\s+constantes[\s\S]*?vigente\.?)",
+        r"(Altera\s+os\s+limites[\s\S]*?posteriores\.?)",
+        r"(Altera\s+mediante\s+remanejamento[\s\S]*?providências\.?)",
         r"(Atualiza\s+os\s+valores[\s\S]*?posteriores\.?)"
     ]
-    
     for pat in patterns:
         m = re.search(pat, text, flags=re.I)
         if m: return re.sub(r"\s+", " ", m.group(1)).strip()
-
-    # Fallback: pega o texto antes do ANEXO I
+    
     pre = re.split(r"ANEXO\s+I", text, flags=re.I)[0]
-    return pre.strip()[:250].rstrip(" ,;") + "..."
+    return pre.strip()[:300].rstrip(" ,;") + "..."
 
 def _port_id_from_text(text: str, name_attr: str) -> str:
-    # 1. Tenta formato padrão completo no texto
-    m = re.search(r"PORTARIA\s+(?:[A-Z]+/?)*MPO\s+N[ºo]?\s*(\d+).+?(20\d{2})", text, flags=re.I)
+    # Tenta pegar número e ano (ex: 499/2025)
+    m = re.search(r"PORTARIA\s+(?:GM/|MF\s+)?(?:MPO|MF)?\s*N[ºo]?\s*(\d+).+?(20\d{2})", text, flags=re.I)
     if m: return f"{m.group(1)}/{m.group(2)}"
     
-    # 2. Tenta pelo atributo 'name' do arquivo XML
-    m2 = re.search(r"Portaria\s+(?:[A-Z]+\.?/?)*MPO\s+n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
+    # Fallback no atributo do XML
+    m2 = re.search(r"n\S*\s+(\d+)[\.\-_/](\d{4})", (name_attr or ""), flags=re.I)
     if m2: return f"{m2.group(1)}/{m2.group(2)}"
     
-    # 3. Fallback genérico
-    if "MPO" in text.upper() or "PLANEJAMENTO" in text.upper():
-        m3 = re.search(r"(?:PORTARIA|RESOLUÇÃO).*?N[ºo]?\s*(\d+)", text, flags=re.I)
-        if m3:
-             ano = "2025" 
-             m_ano = re.search(r"(202\d)", text)
-             if m_ano: ano = m_ano.group(1)
-             return f"{m3.group(1)}/{ano}"
-
-    return "PORTARIA MPO (ID n/d)"
+    return "N/D"
 
 def _group_files_by_base(zip_names: Iterable[str]) -> Dict[str, List[Tuple[int, str]]]:
-    groups: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    groups = defaultdict(list)
     for n in zip_names:
-        # Agrupa arquivos divididos (ex: id-1.xml, id-2.xml) ou únicos (id.xml)
-        # Regex ajustada para pegar o ID numérico base
         m = re.search(r"(\d+)(?:-(\d+))?\.xml$", n, flags=re.I)
         if m:
-            base = m.group(1) # O ID da matéria (ex: 23408456)
+            base = m.group(1)
             suffix = int(m.group(2) or 0)
             groups[base].append((suffix, n))
-            
-    for base in groups:
-        groups[base].sort()
+    for base in groups: groups[base].sort()
     return groups
+
+def _clean_brl(val_str: str) -> float:
+    try:
+        return float(val_str.replace(".", "").replace(",", "."))
+    except:
+        return 0.0
 
 def _parse_totals_rows(xml_bytes: bytes, mb_ugs: Iterable[str]) -> List[Dict]:
     try:
@@ -109,84 +110,100 @@ def _parse_totals_rows(xml_bytes: bytes, mb_ugs: Iterable[str]) -> List[Dict]:
 
     texto = art.find(".//body/Texto")
     if texto is None or texto.text is None: return []
-    
-    html = texto.text
-    try: 
-        clean_html = _sanitize_html_content(html)
+
+    # Parse HTML
+    try:
+        clean_html = _sanitize_html_content(texto.text)
         root = ET.fromstring(f"<root>{clean_html}</root>")
     except: return []
 
     rows = []
+    
+    # Contexto Atual (State Machine)
     current_ug = None
-    current_kind = "OUTROS" # Default seguro
+    current_action = None # Código da ação (ex: 123H)
+    current_kind = "OUTROS"
+    current_rp_context = None # RP2, RP3, PAC
+    
     mb_ugs = set(mb_ugs)
 
-    # Iteramos sobre TODOS os elementos para pegar contexto (<p>) e dados (<tr>)
+    # Itera sobre elementos (p e tr)
     for elem in root.iter():
-        # Normaliza o texto do elemento
         elem_text = " ".join(x.strip() for x in elem.itertext() if x.strip()).upper()
         
-        # 1. Detecção de Contexto (Cabeçalhos fora da tabela)
-        # Prioridade para palavras-chave que indicam o sentido do valor
+        # 1. Detectar Contexto Geral (Suplementação vs Cancelamento)
         if "REDUÇÃO" in elem_text or "CANCELAMENTO" in elem_text or "BLOQUEIO" in elem_text:
-            current_kind = "CANCELAMENTO" # Bloqueio tratado como redução para alerta visual
+            current_kind = "CANCELAMENTO"
+            current_action = None # Reseta ação ao mudar de bloco
         elif "ACRÉSCIMO" in elem_text or "SUPLEMENTA" in elem_text or "AMPLIAÇÃO" in elem_text:
             current_kind = "SUPLEMENTACAO"
-        
-        # Se for uma linha de tabela, processa os dados
+            current_action = None
+
+        # 2. Detectar Contexto de RP / Anexo (Portaria Limites/MF)
+        if "RP 2" in elem_text or "PRIMÁRIAS DISCRICIONÁRIAS" in elem_text:
+            current_rp_context = "RP2"
+        elif "RP 3" in elem_text or "PAC" in elem_text:
+            current_rp_context = "RP3 (PAC)"
+        elif "RP 6" in elem_text or "RP 7" in elem_text:
+            current_rp_context = "Emendas"
+        elif "ANEXO II" in elem_text and "PAC" in elem_text:
+            current_rp_context = "PAC (Anexo)"
+            
+        # 3. Processar Linhas de Tabela
         if elem.tag == 'tr':
             tr_text = " ".join(x.strip() for x in elem.itertext() if x.strip())
-            tr_text_upper = tr_text.upper()
+            tr_upper = tr_text.upper()
 
-            # Lógica A: UG no cabeçalho (Formato Crédito Suplementar Detalhado)
+            # A) Detectar UG no Cabeçalho
             m_ug_header = re.search(r"UNIDADE:?\s*(\d{5})", tr_text, re.I)
             if m_ug_header:
                 current_ug = m_ug_header.group(1)
-                # O kind geralmente já foi definido pelo contexto anterior
+                current_action = None # Nova UG, reseta ação
                 continue
 
-            # Identifica se é linha de cabeçalho interno de anexo para reforçar o contexto
-            if "ANEXO" in tr_text_upper and "REDUÇÃO" in tr_text_upper: current_kind = "CANCELAMENTO"
-            if "ANEXO" in tr_text_upper and "AMPLIAÇÃO" in tr_text_upper: current_kind = "SUPLEMENTACAO"
-
-            # Tentativa de extração de valor
-            ug_to_use = current_ug
+            # B) Detectar Programa de Trabalho (PT) -> Extrair Ação
+            # Ex: 10.302.2015.8585.0000
+            m_pt = re.search(r"\d{4}\.\d{4}\.\d{4}\.([0-9A-Z]{4})", tr_text)
+            if m_pt:
+                current_action = m_pt.group(1) # Ex: 8585
             
-            # Lógica B: UG na própria linha (Formato Limites/Portaria 495)
-            # Procura por "52000" no início da linha
+            # C) Detectar UG na linha (Tabelas de Limites/Financeiro)
+            row_ug = current_ug
             m_ug_inline = re.search(r"^(\d{5})\b", tr_text.strip())
             if m_ug_inline:
-                ug_candidate = m_ug_inline.group(1)
-                if ug_candidate in mb_ugs:
-                    ug_to_use = ug_candidate
-            
-            # Se temos uma UG alvo identificada (seja pelo header ou inline)
-            if ug_to_use in mb_ugs:
-                # Regex para pegar valores monetários (ex: 1.181.099,00 ou 1.181.099)
-                # Pega todos os valores da linha
+                row_ug = m_ug_inline.group(1)
+
+            # D) Se a linha pertence a uma UG de interesse
+            if row_ug in mb_ugs:
+                # Extrai valores
                 matches = re.findall(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)", tr_text)
-                
                 if matches:
-                    # Normalmente o valor relevante é o último (Total) ou o único da linha
-                    val_str = matches[-1].replace(".", "").replace(",", ".")
-                    try:
-                        val = float(val_str)
+                    # Pega o maior valor da linha (geralmente é o total ou o valor alvo)
+                    # Evita pegar "2025" (ano)
+                    valid_vals = []
+                    for v_str in matches:
+                        v_float = _clean_brl(v_str)
+                        if v_float > 2030: # Filtra ano
+                            valid_vals.append(v_float)
+                    
+                    if valid_vals:
+                        val = valid_vals[-1] # Assume o último como valor
                         
-                        # Filtros de ruído
-                        is_year = "2024" in tr_text or "2025" in tr_text
-                        # Se o valor for igual ao ano (ex: 2025.0), ignora, a menos que seja muito grande
-                        if is_year and val == 2025.0: continue
+                        # Refinamento de RP na linha (se houver coluna explicita)
+                        row_rp = current_rp_context
+                        if "RP 2" in tr_upper: row_rp = "RP2"
+                        if "RP 3" in tr_upper or "PAC" in tr_upper: row_rp = "RP3 (PAC)"
+
+                        rows.append({
+                            "UG": row_ug,
+                            "kind": current_kind,
+                            "action": current_action, # Pode ser None
+                            "rp": row_rp, # Pode ser None
+                            "valor": val
+                        })
                         
-                        if val > 0:
-                            rows.append({
-                                "UG": ug_to_use,
-                                "kind": current_kind,
-                                "valor": val
-                            })
-                            # Reseta UG inline para não poluir próximas linhas
-                            if m_ug_inline: current_ug = None
-                            
-                    except: continue
+                        # Reseta UG inline para não contaminar próximas linhas se não for tabela contínua
+                        if m_ug_inline: current_ug = None 
 
     return rows
 
@@ -194,7 +211,7 @@ def _brl(n: float) -> str:
     s = f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
 
-# ----------------------------- API pública ----------------------------- #
+# ---------------- API PÚBLICA ---------------- #
 
 def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[str] = None):
     if mb_ugs is None: mb_ugs = MB_UGS_DEFAULT
@@ -211,52 +228,42 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
         base_to_hint = {}
 
         for base, items in groups.items():
-            # Tenta ler o header do primeiro arquivo do grupo
             header_name = items[0][1] 
             try:
-                with z.open(header_name) as f: xmlb = f.read()
-                parser = ET.XMLParser(encoding="utf-8")
-                art = ET.fromstring(xmlb, parser=parser)
-                
-                text_node = art.find(".//body/Texto")
-                full_text = _html_to_text(text_node.text) if text_node is not None else ""
-                ident_node = art.find(".//body/Identifica")
-                ident_text = _html_to_text(ident_node.text) if ident_node is not None else ""
-                
-                combined_text = (ident_text + "\n" + full_text).strip()
-                
-                cat = art.attrib.get("artCategory", "").upper()
-                pid = _port_id_from_text(combined_text, art.attrib.get("name", ""))
-                
-                # Critérios de Aceite
-                has_valid_id = pid != "PORTARIA MPO (ID n/d)"
-                is_mpo_doc = "PLANEJAMENTO" in cat or "MPO" in cat or "PLANEJAMENTO" in full_text.upper() or "MPO" in full_text.upper()
-                
-                if has_valid_id or is_mpo_doc:
-                    base_to_pid[base] = pid
-                    base_to_hint[base] = _extract_header_hint(full_text)
+                with z.open(header_name) as f: 
+                    xmlb = f.read()
+                    parser = ET.XMLParser(encoding="utf-8")
+                    art = ET.fromstring(xmlb, parser=parser)
                     
-            except Exception as e:
-                print(f"[DEBUG MPO] Erro ao ler header {header_name}: {e}")
-                continue
+                    text_node = art.find(".//body/Texto")
+                    full_text = _html_to_text(text_node.text) if text_node else ""
+                    
+                    # Filtro de Relevância
+                    cat = art.attrib.get("artCategory", "").upper()
+                    is_budget = "MPO" in cat or "PLANEJAMENTO" in cat or "FAZENDA" in cat
+                    is_budget_text = "MPO" in full_text or "ORÇAMENTO" in full_text
+                    
+                    pid = _port_id_from_text(full_text, art.attrib.get("name", ""))
+                    
+                    if is_budget or is_budget_text:
+                        base_to_pid[base] = pid
+                        base_to_hint[base] = _extract_header_hint(full_text)
+                    
+            except: continue
 
-        # Processa TODOS os arquivos XML (partes da mesma matéria)
         for n in xml_names:
-            # Encontra a base deste arquivo
             m = re.search(r"(\d+)(?:-(\d+))?\.xml$", n)
             if not m: continue
-            
             base = m.group(1)
             if base in base_to_pid:
                 pid = base_to_pid[base]
                 try:
                     with z.open(n) as f:
-                        # Extrai linhas de dados deste arquivo
                         rows = _parse_totals_rows(f.read(), mb_ugs)
                         if rows:
                             agg[pid].extend(rows)
                 except: continue
-
+                
         for base, pid in base_to_pid.items():
             if pid in agg:
                 pid_to_hint[pid] = base_to_hint.get(base, "Ato Orçamentário")
@@ -264,55 +271,74 @@ def parse_zip_in_memory(zip_file_obj: Union[str, io.BytesIO], mb_ugs: Iterable[s
     return agg, pid_to_hint
 
 def render_whatsapp_block(pid: str, hint: str, rows: List[Dict]) -> str:
+    """Renderiza a mensagem no formato desejado pelo usuário (Granularidade de Ação)."""
+    
+    # 1. Separa tipos
     sup_rows = [r for r in rows if r["kind"] == "SUPLEMENTACAO"]
     canc_rows = [r for r in rows if r["kind"] == "CANCELAMENTO"]
-
-    # Agrupa valores por UG (soma se houver múltiplas linhas para a mesma UG)
-    def aggregate_per_ug(row_list):
-        ug_sum = defaultdict(float)
-        for r in row_list:
-            ug_sum[r["UG"]] += r["valor"]
-        return ug_sum
-
-    sup_agg = aggregate_per_ug(sup_rows)
-    canc_agg = aggregate_per_ug(canc_rows)
-
+    
     wa = []
     wa.append(f"🔎 *Análise Contábil Automática ({pid})*")
     wa.append(f"_{hint}_")
     wa.append("")
 
-    if sup_agg:
-        total_sup = sum(sup_agg.values())
-        wa.append(f"🟢 *Ampliação/Suplementação:* {_brl(total_sup)}")
-        for ug, val in sup_agg.items():
-            nome_ug = ""
-            if ug == "52131": nome_ug = "- CM"
-            elif ug == "52931": nome_ug = "- FuN"
-            elif ug == "52233": nome_ug = "- AMAZUL"
-            elif ug == "52000": nome_ug = "- MD"
-            wa.append(f"   └ UG {ug} {nome_ug}: {_brl(val)}")
-    
-    if canc_agg:
-        if sup_agg: wa.append("") 
-        total_canc = sum(canc_agg.values())
-        # Usa termo genérico para cobrir Bloqueio e Redução
-        wa.append(f"🔴 *Redução/Bloqueio:* {_brl(total_canc)}")
-        for ug, val in canc_agg.items():
-            nome_ug = ""
-            if ug == "52000": nome_ug = "- MD"
-            wa.append(f"   └ UG {ug} {nome_ug}: {_brl(val)}")
+    def render_section(title, emoji, data_rows):
+        if not data_rows: return 0.0
+        
+        # Agrupa por UG + Ação + RP
+        grouped = defaultdict(float)
+        for r in data_rows:
+            key_ug = r["UG"]
+            key_act = r["action"] if r["action"] else "Geral"
+            key_rp = r["rp"] if r["rp"] else ""
+            grouped[(key_ug, key_act, key_rp)] += r["valor"]
+            
+        total_sec = sum(grouped.values())
+        wa.append(f"{emoji} *{title}:* {_brl(total_sec)}")
+        
+        # Ordena: Defesa (52000) e CM (52111/52131) primeiro
+        sorted_keys = sorted(grouped.keys(), key=lambda k: k[0])
+        
+        for ug, act, rp in sorted_keys:
+            # Formata Nome da Ação
+            act_name = act
+            if act in STRATEGIC_MAP:
+                act_name = f"{act} ({STRATEGIC_MAP[act]})"
+            elif act == "Geral":
+                act_name = "" # Não mostra 'Geral' se não tiver ação
+            else:
+                act_name = f"Ação {act}"
 
-    total_sup = sum(sup_agg.values())
-    total_canc = sum(canc_agg.values())
-    net = total_sup - total_canc
-    
+            # Formata RP/Contexto
+            rp_str = f" [{rp}]" if rp else ""
+            
+            # Formata UG
+            ug_sufix = ""
+            if ug == "52000": ug_sufix = "- MD"
+            elif ug == "52131": ug_sufix = "- CM"
+            elif ug == "52931": ug_sufix = "- FuN"
+            
+            line_str = f"   └ UG {ug}{ug_sufix}"
+            if act_name: line_str += f" | {act_name}"
+            if rp_str: line_str += rp_str
+            line_str += f": {_brl(grouped[(ug, act, rp)])}"
+            
+            wa.append(line_str)
+        
+        return total_sec
+
+    tot_sup = render_section("Ampliação/Suplementação", "✅", sup_rows)
+    if tot_sup > 0 and canc_rows: wa.append("") # Espaçamento
+    tot_canc = render_section("Redução/Cancelamento", "🔻", canc_rows) # Usei 🔻 pois é mais visual que vermelho sólido
+
+    net = tot_sup - tot_canc
     wa.append("")
+    
     if net > 0:
         wa.append(f"💰 *Saldo Líquido Positivo:* {_brl(net)}")
     elif net < 0:
-        wa.append(f"🔻 *Saldo Líquido Negativo:* {_brl(net)}")
+        wa.append(f"⚠️ *Saldo Líquido Negativo:* {_brl(net)}")
     else:
-        wa.append(f"⚪ *Remanejamento sem alteração de valor global.*")
-    
+        wa.append(f"⚪ *Remanejamento sem alteração líquida.*")
+
     return "\n".join(wa)
