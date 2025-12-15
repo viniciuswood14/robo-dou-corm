@@ -1,5 +1,5 @@
 # Nome do arquivo: api.py
-# Versão: 17.3 (Limpeza de Títulos e Ementas)
+# Versão: 17.4 (Limpeza de HTML Residual em Resumos)
 
 from fastapi import FastAPI, Form, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,7 +49,7 @@ except ImportError:
 # API SETUP
 # =====================================================================================
 
-app = FastAPI(title="Robô DOU/Valor API - v17.3")
+app = FastAPI(title="Robô DOU/Valor API - v17.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,7 +61,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    print(">>> SISTEMA UNIFICADO INICIADO (v17.3 - Títulos Limpos) <<<")
+    print(">>> SISTEMA UNIFICADO INICIADO (v17.4 - HTML Clean) <<<")
     try:
         if not os.path.exists(HISTORICAL_CACHE_PATH):
             asyncio.create_task(update_pac_historical_cache())
@@ -159,34 +159,47 @@ def norm(s: Optional[str]) -> str:
 def clean_title(raw_title: str) -> str:
     """Limpa títulos sujos vindos do nome do arquivo."""
     t = raw_title
-    # Ex: Portaria GM.MPO nA 499.2025 e an -> Portaria GM/MPO Nº 499/2025
     t = t.replace("nA", "Nº").replace("na", "Nº")
     t = t.replace(".2025", "/2025").replace(".2024", "/2024")
     t = t.replace("GM.MPO", "GM/MPO").replace("e an", "")
     t = t.replace("_", " ").replace(".doc", "").replace(".xml", "")
-    # Remove sufixos numéricos de arquivo duplicado (ex: -6)
     t = re.sub(r"-\d+$", "", t)
     return norm(t)
 
-def extract_fallback_summary(text: str) -> str:
-    """Tenta extrair um resumo quando a Ementa está vazia."""
-    # 1. Tenta pegar o primeiro parágrafo significativo (ex: Abre aos Orçamentos...)
-    match = re.search(r"(Abre aos? Orçamentos?.*?vigente\.?)", text, re.IGNORECASE | re.DOTALL)
-    if match:
-        return norm(match.group(1))
-    
-    match2 = re.search(r"(Altera.*?providências\.?)", text, re.IGNORECASE | re.DOTALL)
-    if match2:
-        return norm(match2.group(1))
+def clean_html_text(raw_text: str) -> str:
+    """
+    Remove tags HTML residuais (<table>, <p>, etc) que vêm do CDATA do XML.
+    Retorna apenas o texto limpo legível.
+    """
+    if not raw_text or "<" not in raw_text:
+        return raw_text
+    try:
+        # Força o parser de HTML na string extraída
+        soup = BeautifulSoup(raw_text, "html.parser")
+        return soup.get_text(" ", strip=True)
+    except:
+        return raw_text
 
-    # 2. Se falhar, pega o texto entre o título e o "Resolve"
-    match3 = re.search(r"^.*?(?:RESOLVE:?|DECIDE:?)(.*)", text, re.DOTALL | re.IGNORECASE)
+def extract_fallback_summary(text: str) -> str:
+    """Tenta extrair um resumo quando a Ementa está vazia, limpando HTML."""
+    
+    # 1. Limpa o HTML primeiro (Fundamental para tabelas MPO)
+    clean_txt = clean_html_text(text)
+    
+    # 2. Tenta pegar o primeiro parágrafo significativo
+    match = re.search(r"(Abre aos? Orçamentos?.*?vigente\.?)", clean_txt, re.IGNORECASE | re.DOTALL)
+    if match: return norm(match.group(1))
+    
+    match2 = re.search(r"(Altera.*?providências\.?)", clean_txt, re.IGNORECASE | re.DOTALL)
+    if match2: return norm(match2.group(1))
+
+    match3 = re.search(r"^.*?(?:RESOLVE:?|DECIDE:?)(.*)", clean_txt, re.DOTALL | re.IGNORECASE)
     if match3:
         candidate = match3.group(1).strip()
         return candidate[:300] + ("..." if len(candidate) > 300 else "")
 
-    # 3. Último caso: Primeiros 300 chars
-    return text[:300] + "..."
+    # 3. Fallback final: Início do texto limpo
+    return clean_txt[:350] + ("..." if len(clean_txt) > 350 else "")
 
 def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
     meses_pt = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"}
@@ -219,8 +232,10 @@ def monta_whatsapp(pubs: List[Publicacao], when: str) -> str:
             lines.append(f"▶️ {p.organ or 'Órgão'}")
             lines.append(f"📌 {clean_title(p.type) or 'Ato'}")
             
-            if p.summary:
-                lines.append(f"_{p.summary}_") 
+            # Limpa o resumo antes de exibir no WhatsApp
+            summary_clean = clean_html_text(p.summary) if p.summary else ""
+            if summary_clean:
+                lines.append(f"_{summary_clean}_") 
             
             reason = p.relevance_reason or "Para conhecimento."
             prefix = "⚓"
@@ -258,7 +273,6 @@ def process_grouped_materia(
     body = main_article.find("body")
     if not body: return None
         
-    # --- Extração de Título (Robustez para XML Vazio) ---
     identifica_node = body.find("Identifica")
     act_type = norm(identifica_node.get_text(strip=True)) if identifica_node else ""
     if not act_type:
@@ -266,17 +280,15 @@ def process_grouped_materia(
     
     if not act_type: return None
     
-    # --- Extração de Resumo (Robustez para Ementa Vazia) ---
     summary = norm(body.find("Ementa").get_text(strip=True) if body.find("Ementa") else "")
     display_text = norm(body.get_text(strip=True))
     
     if not summary:
-        # Tenta regex padrão
         match = re.search(r"EMENTA:(.*?)(Vistos|ACORDAM)", display_text, re.DOTALL | re.I)
         if match: 
             summary = norm(match.group(1))
         else:
-            # Fallback agressivo: Pega o primeiro parágrafo útil
+            # Pega o texto limpo do HTML
             summary = extract_fallback_summary(display_text)
     
     is_relevant = False
@@ -452,7 +464,7 @@ async def processar_inlabs(
     pubs_final: List[Publicacao] = []
     usou_fallback = False
     
-    print(f">>> Tentando InLabs (v17.3) para {data}...")
+    print(f">>> Tentando InLabs (v17.4) para {data}...")
     try:
         client = await inlabs_login_and_get_session()
         try:
@@ -559,7 +571,6 @@ async def get_ai_analysis(clean_text: str, model: genai.GenerativeModel, prompt_
         print(f"Erro IA: {e}")
         return None
 
-# Endpoints Legislativo e Outros
 class TrackRequest(BaseModel):
     uid: str
     casa: str
