@@ -249,9 +249,16 @@ def process_grouped_materia(
     organ = norm(main_article.get("artCategory", ""))
     organ_lower = organ.lower()
     
-    # Filtro de ruído
-    if "comando da aeronáutica" in organ_lower or "comando do exército" in organ_lower:
-        return None
+    # [CORREÇÃO CRÍTICA]
+    # Antes: Descartava se tivesse Exercito/Aeronautica no Órgão.
+    # Problema: Portarias do MPO citam "Orçamento Fiscal" mas as vezes o metadata vem sujo
+    # Solução: Só descarta se for EXCLUSIVAMENTE ato interno das outras forças.
+    # Se for MPO/Fazenda/Presidência, NUNCA descarta, pois pode ser crédito conjunto.
+    is_central_budget_organ = any(x in organ_lower for x in ["planejamento", "orçamento", "fazenda", "gestão", "economia", "presidência"])
+    
+    if not is_central_budget_organ:
+        if "comando da aeronáutica" in organ_lower or "comando do exército" in organ_lower:
+            return None
         
     section = (main_article.get("pubName", "") or "").upper()
     body = main_article.find("body")
@@ -275,20 +282,27 @@ def process_grouped_materia(
     
     if "DO1" in section:
         # Lógica para MPO / Fazenda
-        is_mpo = any(x in organ_lower for x in ["planejamento", "orçamento", "fazenda", "gestão", "economia"])
+        is_mpo = is_central_budget_organ
         
         if is_mpo:
-            # Procura códigos da Marinha no texto bruto
+            # 1. Procura códigos da Marinha/Defesa
             found_navy_codes = [code for code in MPO_NAVY_TAGS if code.lower() in search_content_lower]
-            # Procura menção por extenso
             found_names = any(n in search_content_lower for n in ["comando da marinha", "fundo naval", "defesa", "amazul"])
             
             if found_navy_codes or found_names:
                 is_relevant = True
                 is_mpo_navy_hit_flag = True
                 reason = "Ato Financeiro/Orçamentário com impacto potencial na Marinha/Defesa."
+            
+            # [CORREÇÃO CRÍTICA 2]
+            # Força a captura se for Crédito Suplementar ou Abertura de Orçamento, 
+            # mesmo que não cite explicitamente a Marinha no texto principal (o anexo pode ter).
+            elif "crédito suplementar" in search_content_lower or "abre aos orçamentos" in search_content_lower:
+                is_relevant = True
+                is_mpo_navy_hit_flag = True # Marca para IA analisar com carinho
+                reason = "Ato de Crédito Suplementar (Captura Preventiva)."
 
-        # Keywords de Interesse Direto
+        # Keywords de Interesse Direto (Para não MPO)
         if not is_relevant:
             for kw in KEYWORDS_DIRECT_INTEREST_S1:
                 if kw.lower() in search_content_lower:
@@ -296,11 +310,11 @@ def process_grouped_materia(
                     reason = f"Menção a termo chave: '{kw}'."
                     break
         
-        # Keywords de Orçamento Genérico (Monitorar, mas com prioridade menor)
+        # Keywords de Orçamento Genérico
         if not is_relevant and is_mpo:
             if any(bkw in search_content_lower for bkw in BUDGET_KEYWORDS_S1):
                 is_relevant = True
-                reason = "Ato orçamentário geral (sem menção explícita à MB identificada por keyword)."
+                reason = "Ato orçamentário geral."
 
     elif "DO2" in section:
         try: soup_copy = BeautifulSoup(full_text_content, "lxml-xml")
