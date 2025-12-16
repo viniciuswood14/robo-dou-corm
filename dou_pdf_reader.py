@@ -1,5 +1,5 @@
 # Nome do arquivo: dou_pdf_reader.py
-# Versão: 5.0 (Link Direto Autenticado - Força Bruta)
+# Versão: 6.0 (Crawler Híbrido + Login Fix)
 
 import fitz  # PyMuPDF
 import httpx
@@ -8,7 +8,8 @@ import asyncio
 import json
 from datetime import datetime
 from typing import List, Dict, Optional
-import google.generativeai as genai
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # ==============================================================================
 # CONFIGURAÇÃO DE CREDENCIAIS
@@ -24,6 +25,8 @@ if not INLABS_USER or not INLABS_PASS:
             INLABS_PASS = cfg.get("INLABS_PASS")
     except: pass
 
+# URLs
+# Nota: Usamos logar.php que é o endpoint padrão do InLabs legado
 INLABS_LOGIN_URL = "https://inlabs.in.gov.br/logar.php" 
 INLABS_BASE_URL = "https://inlabs.in.gov.br"
 
@@ -81,11 +84,10 @@ Resumo executivo de 2 linhas:
 """
 
 # ==============================================================================
-# 3. FUNÇÕES DE DOWNLOAD (LINK DIRETO + AUTENTICAÇÃO)
+# 3. FUNÇÕES DE CRAWLER & DOWNLOAD
 # ==============================================================================
 
 async def get_pdf_link_for_date(date_str: str, section: str = "do1") -> Optional[str]:
-    # Retorna a data para uso interno
     return date_str
 
 async def download_pdf(date_str: str, filename: str) -> str:
@@ -99,62 +101,75 @@ async def download_pdf(date_str: str, filename: str) -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    async with httpx.AsyncClient(timeout=120, verify=False, headers=headers, follow_redirects=True) as client:
-        # --- 1. LOGIN ---
+    async with httpx.AsyncClient(timeout=60, verify=False, headers=headers, follow_redirects=True) as client:
+        # --- PASSO 1: LOGIN (Payload Duplo para Garantia) ---
         print(f"[PDF] Logando no InLabs ({INLABS_USER})...")
-        await client.get(INLABS_BASE_URL) # Cookies
+        await client.get(INLABS_BASE_URL)
         
-        # Payload de login
-        resp_login = await client.post(INLABS_LOGIN_URL, data={"email": INLABS_USER, "senha": INLABS_PASS})
+        # Envia 'password' E 'senha' para garantir compatibilidade com versões diferentes do backend
+        login_data = {
+            "email": INLABS_USER, 
+            "password": INLABS_PASS, 
+            "senha": INLABS_PASS
+        }
+        resp_login = await client.post(INLABS_LOGIN_URL, data=login_data)
         
-        # --- 2. CONSTRUÇÃO DO LINK DIRETO ---
-        # Data formato: YYYY-MM-DD
-        # Link formato: index.php?p=YYYY-MM-DD&dl=YYYY_MM_DD_ASSINADO_do1.pdf
-        try:
+        # --- PASSO 2: TENTATIVA VIA CRAWLER (Buscar link na página) ---
+        day_url = f"{INLABS_BASE_URL}/index.php?p={date_str}"
+        print(f"[PDF] Acessando índice: {day_url}")
+        resp_page = await client.get(day_url)
+        
+        soup = BeautifulSoup(resp_page.text, "html.parser")
+        target_href = None
+        
+        # Procura links .pdf
+        all_pdfs = [a["href"] for a in soup.find_all("a", href=True) if ".pdf" in a["href"].lower()]
+        
+        # Filtra Seção 1
+        for href in all_pdfs:
+            if "do1" in href.lower() or "secao_1" in href.lower():
+                target_href = href
+                print(f"[PDF] Crawler encontrou link: {target_href}")
+                break
+        
+        # Se o Crawler falhar, tenta o Método Direto (Força Bruta)
+        if not target_href:
+            print("[PDF] Crawler não achou link na página. Tentando construção direta...")
             dt = datetime.strptime(date_str, "%Y-%m-%d")
-            data_dl = dt.strftime("%Y_%m_%d") # 2025_12_16
+            data_dl = dt.strftime("%Y_%m_%d")
+            # Tenta padrão 'ASSINADO'
+            target_href = f"index.php?p={date_str}&dl={data_dl}_ASSINADO_do1.pdf"
+        
+        final_url = urljoin(INLABS_BASE_URL, target_href)
+        
+        # --- PASSO 3: BAIXAR ---
+        print(f"[PDF] Baixando: {final_url}")
+        resp_file = await client.get(final_url)
+        
+        # --- PASSO 4: VALIDAÇÃO DO ARQUIVO ---
+        content_type = resp_file.headers.get("content-type", "").lower()
+        file_size_kb = len(resp_file.content) / 1024
+        
+        # Se for HTML ou muito pequeno -> Erro
+        if "text/html" in content_type or file_size_kb < 15:
+            # Tenta ler o título do HTML para saber o erro
+            try:
+                err_soup = BeautifulSoup(resp_file.content, "html.parser")
+                page_title = err_soup.title.string.strip() if err_soup.title else "Sem Título"
+                h1_text = err_soup.find("h1").get_text().strip() if err_soup.find("h1") else ""
+            except:
+                page_title = "Erro desconhecido"
+                h1_text = ""
+
+            error_msg = f"InLabs retornou HTML ({page_title} - {h1_text}). Provável Login Inválido ou Arquivo não publicado."
+            print(f"[PDF] FALHA: {error_msg}")
+            raise ValueError(error_msg)
+
+        with open(path, "wb") as f:
+            f.write(resp_file.content)
             
-            # Link da Seção 1
-            # Tenta primeiro com "ASSINADO" (Padrão novo)
-            filename_server = f"{data_dl}_ASSINADO_do1.pdf"
-            direct_url = f"{INLABS_BASE_URL}/index.php?p={date_str}&dl={filename_server}"
-            
-            print(f"[PDF] Tentando baixar direto: {direct_url}")
-            resp_pdf = await client.get(direct_url)
-
-            # Verifica se deu erro (arquivo pequeno = HTML de erro)
-            if len(resp_pdf.content) < 15000 or "text/html" in resp_pdf.headers.get("content-type", ""):
-                print("[PDF] Link padrão falhou (veio HTML). Tentando formato alternativo (sem ASSINADO)...")
-                
-                # Tentativa 2: Sem "ASSINADO" (Padrão antigo ou erro de nomeação)
-                filename_alt = f"{data_dl}_do1.pdf"
-                alt_url = f"{INLABS_BASE_URL}/index.php?p={date_str}&dl={filename_alt}"
-                print(f"[PDF] Tentando alternativo: {alt_url}")
-                resp_pdf = await client.get(alt_url)
-
-            # Validação Final
-            content_type = resp_pdf.headers.get("content-type", "").lower()
-            if "text/html" in content_type:
-                # Salva o HTML de erro para debug no log (primeiros 200 chars)
-                snippet = resp_pdf.text[:200].replace("\n", " ")
-                print(f"[PDF] ERRO CRÍTICO: Servidor retornou HTML: {snippet}")
-                raise ValueError("InLabs retornou HTML em vez de PDF. Verifique se o jornal DE HOJE já foi publicado.")
-
-            with open(path, "wb") as f:
-                f.write(resp_pdf.content)
-            
-            size_kb = os.path.getsize(path) / 1024
-            print(f"[PDF] Download Sucesso: {size_kb:.2f} KB")
-            
-            if size_kb < 10:
-                raise ValueError("Arquivo baixado é muito pequeno (possível erro de login ou arquivo vazio).")
-
-            return path
-
-        except Exception as e:
-            print(f"[PDF] Falha no processo de download: {e}")
-            if os.path.exists(path): os.remove(path)
-            raise e
+        print(f"[PDF] Download Sucesso: {file_size_kb:.2f} KB")
+        return path
 
 def extract_text_from_page(page) -> str:
     return page.get_text("text")
