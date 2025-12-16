@@ -267,7 +267,7 @@ async def execute_dou_pdf_analysis(data: str) -> List[Publicacao]:
     # 3. Analisar com Gemini Vision (Prompt Especialista)
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-flash") # Modelo rápido e com vision/texto longo
+        model = genai.GenerativeModel("gemini-3-pro") # Modelo rápido e com vision/texto longo
         
         # A função analyze_pdf_content do dou_pdf_reader já faz a lógica:
         # Pega página -> MPO? -> Prompt MPO. Outros? -> Prompt Geral.
