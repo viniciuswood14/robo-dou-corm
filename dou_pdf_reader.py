@@ -1,5 +1,5 @@
 # Nome do arquivo: dou_pdf_reader.py
-# Versão: 3.1 (Correção de Rota de Login InLabs)
+# Versão: 4.0 (Crawler Real - Scraper de Link)
 
 import fitz  # PyMuPDF
 import httpx
@@ -8,10 +8,11 @@ import asyncio
 import json
 from datetime import datetime
 from typing import List, Dict, Optional
-import google.generativeai as genai
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # ==============================================================================
-# CONFIGURAÇÃO DE CREDENCIAIS INLABS
+# CONFIGURAÇÃO DE CREDENCIAIS
 # ==============================================================================
 INLABS_USER = os.environ.get("INLABS_USER")
 INLABS_PASS = os.environ.get("INLABS_PASS")
@@ -22,25 +23,18 @@ if not INLABS_USER or not INLABS_PASS:
             cfg = json.load(f)
             INLABS_USER = cfg.get("INLABS_USER")
             INLABS_PASS = cfg.get("INLABS_PASS")
-    except:
-        pass
+    except: pass
 
-# URL CORRIGIDA PARA O ENDPOINT REAL DE LOGIN DO INLABS
+# URLs
 INLABS_LOGIN_URL = "https://inlabs.in.gov.br/logar.php" 
 INLABS_BASE_URL = "https://inlabs.in.gov.br"
 
 # ==============================================================================
-# 1. LISTAS DE INTERESSE ESTRATÉGICO
+# 1. LISTAS DE INTERESSE
 # ==============================================================================
-
 NAVY_UGS = {
-    "52131": "Comando da Marinha",
-    "52133": "SECIRM",
-    "52232": "CCCPM",
-    "52233": "AMAZUL",
-    "52931": "Fundo Naval",
-    "52932": "Fundo Ensino Profissional Marítimo",
-    "52000": "Ministério da Defesa"
+    "52131": "Comando da Marinha", "52133": "SECIRM", "52232": "CCCPM",
+    "52233": "AMAZUL", "52931": "Fundo Naval", "52932": "FDEPM", "52000": "MD"
 }
 
 KEYWORDS_DIRECT = [
@@ -61,169 +55,134 @@ KEYWORDS_BUDGET = [
 # ==============================================================================
 # 2. PROMPTS
 # ==============================================================================
-
 PROMPT_ESPECIALISTA_MPO = """
 ### ROLE
 Você é um Especialista em Análise Orçamentária e Defesa (Marinha do Brasil).
 
 ### TAREFA
 Analise esta página do DOU (Ministério do Planejamento/Fazenda).
-Verifique se há menção às seguintes UGs (Tags):
-- 52131 (Comando da Marinha)
-- 52133 (SECIRM)
-- 52232 (CCCPM)
-- 52233 (AMAZUL)
-- 52931 (Fundo Naval)
-- 52932 (Fundo Ensino)
-- 52000 (MD - Apenas p/ Movimentação/Limites)
+Busque especificamente pelas UGs: 52131, 52133, 52232, 52233, 52931, 52932, 52000.
 
-### REGRAS DE DECISÃO
-1. Se encontrar qualquer uma das UGs acima com valores (Suplementação, Crédito, Fontes):
-   -> Classifique como TIPO 1, 2, 3 ou 4.
-   -> Extraia os valores exatos.
+### REGRAS
+1. Achou UG da MB com valores? -> Classifique (Tipo 1, 2, 3 ou 4) e extraia valores.
+2. É portaria de Orçamento (MPO/MF) mas NÃO cita MB? -> Classifique como TIPO 5 (Sem Impacto).
+   Resumo: "Para conhecimento. Sem impacto para a Marinha."
 
-2. Se NÃO encontrar as UGs acima, mas for uma Portaria de Crédito/Orçamento do MPO/MF:
-   -> Classifique como TIPO 5 (Sem Impacto).
-   -> Resumo obrigatório: "Para conhecimento. Sem impacto para a Marinha."
-
-### FORMATO DE SAÍDA (Apenas o texto abaixo)
+### SAÍDA (Texto puro)
 ▶️ [Órgão Emissor]
 📌 [NOME DA PORTARIA]
-[Breve resumo do que trata a portaria]
-⚓ [Sua Análise aqui]
+[Resumo]
+⚓ [Análise]
 """
 
 PROMPT_GERAL_MB = """
-Você é um analista da Marinha. Encontrei termos de interesse (Defesa, Submarino, Fundo Naval, etc) nesta página.
-Faça um resumo executivo de 2 linhas para WhatsApp.
-Comece com: "▶️ [Órgão] - [Assunto]"
-Termine com: "⚓ [Impacto/Resumo]"
+Você é um analista da Marinha. Encontrei termos de interesse (Defesa, Submarino, etc).
+Resumo executivo de 2 linhas:
+▶️ [Órgão] - [Assunto]
+⚓ [Impacto/Resumo]
 """
 
 # ==============================================================================
-# 3. FUNÇÕES DE DOWNLOAD (VIA INLABS)
+# 3. FUNÇÕES DE CRAWLER (CORRIGIDAS)
 # ==============================================================================
 
 async def get_pdf_link_for_date(date_str: str, section: str = "do1") -> Optional[str]:
     """
-    Constrói o link direto do InLabs baseada na data.
-    Padrão: https://inlabs.in.gov.br/index.php?p=2025-12-16&dl=2025_12_16_ASSINADO_do1.pdf
+    Nesta versão Scraper, esta função retorna apenas a DATA.
+    A busca do link real acontece dentro do download_pdf para manter a sessão ativa.
     """
-    try:
-        # Formato de entrada date_str: YYYY-MM-DD
-        dt_obj = datetime.strptime(date_str, "%Y-%m-%d")
-        
-        p_param = date_str # Ex: 2025-12-16
-        
-        # dl_param Ex: 2025_12_16_ASSINADO_do1.pdf
-        dl_date = dt_obj.strftime("%Y_%m_%d")
-        dl_param = f"{dl_date}_ASSINADO_{section}.pdf"
-        
-        # Monta URL
-        url = f"{INLABS_BASE_URL}/index.php?p={p_param}&dl={dl_param}"
-        
-        print(f"[PDF] Link InLabs construído: {url}")
-        return url
-        
-    except Exception as e:
-        print(f"[PDF] Erro ao construir link: {e}")
-        return None
+    return date_str
 
-async def download_pdf(url: str, filename: str) -> str:
+async def download_pdf(date_str: str, filename: str) -> str:
     """
-    Realiza login no InLabs e baixa o PDF autenticado.
+    Loga, acessa a página do dia, encontra o link real no HTML e baixa.
     """
     path = os.path.join("/tmp", filename)
     if os.name == 'nt': path = filename
 
     if not INLABS_USER or not INLABS_PASS:
-        print("[PDF] Erro: Credenciais do InLabs não encontradas (INLABS_USER/PASS).")
-        raise ValueError("Credenciais InLabs ausentes")
+        raise ValueError("Credenciais InLabs ausentes no config ou ENV.")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    async with httpx.AsyncClient(timeout=120, verify=True, headers=headers, follow_redirects=True) as client:
-        # 1. Login
-        print(f"[PDF] Autenticando no InLabs como {INLABS_USER}...")
-        try:
-            # Acessa home para pegar cookies
-            await client.get(INLABS_BASE_URL)
-            
-            # Post Login - CORRIGIDO PARA 'senha' E URL 'logar.php'
-            resp_login = await client.post(
-                INLABS_LOGIN_URL, 
-                data={"email": INLABS_USER, "senha": INLABS_PASS}
-            )
-            
-            # logar.php geralmente redireciona (302) ou retorna 200.
-            if resp_login.status_code >= 400:
-                print(f"[PDF] Falha no login: {resp_login.status_code}")
-                # Às vezes retorna 404 se a rota estiver errada, mas logar.php deve existir.
-                raise ValueError("Falha Login InLabs")
-                
-        except Exception as e:
-            print(f"[PDF] Erro na conexão de login: {e}")
-            raise e
+    async with httpx.AsyncClient(timeout=60, verify=False, headers=headers, follow_redirects=True) as client:
+        # --- 1. LOGIN ---
+        print(f"[PDF] Logando no InLabs ({INLABS_USER})...")
+        await client.get(INLABS_BASE_URL) # Cookies iniciais
+        
+        # Post no logar.php (campo 'senha' confirmado)
+        resp_login = await client.post(INLABS_LOGIN_URL, data={"email": INLABS_USER, "senha": INLABS_PASS})
+        
+        # --- 2. ACESSAR PÁGINA DO DIA ---
+        day_url = f"{INLABS_BASE_URL}/index.php?p={date_str}"
+        print(f"[PDF] Acessando índice do dia: {day_url}")
+        resp_page = await client.get(day_url)
+        
+        # --- 3. ENCONTRAR O LINK NO HTML (BS4) ---
+        soup = BeautifulSoup(resp_page.text, "html.parser")
+        
+        target_href = None
+        
+        # Procura todos os links .pdf
+        links_pdf = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if ".pdf" in href.lower():
+                links_pdf.append(href)
+                # Tenta achar 'do1' ou 'secao_1' no link
+                if "do1" in href.lower() or "secao_1" in href.lower() or "secao1" in href.lower():
+                    target_href = href
+                    break 
+        
+        if not target_href:
+            # Fallback: Se não achou "do1" no nome, pega o primeiro PDF que tiver (geralmente é o principal)
+            if links_pdf:
+                print(f"[PDF] Aviso: Link explícito 'do1' não achado. Usando o primeiro PDF: {links_pdf[0]}")
+                target_href = links_pdf[0]
+            else:
+                print("[PDF] ERRO CRÍTICO: Nenhum PDF encontrado na página do dia.")
+                # print(resp_page.text[:500]) # Debug se precisar
+                raise ValueError("PDF não encontrado no HTML")
 
-        # 2. Download PDF
-        print(f"[PDF] Baixando arquivo: {url}")
-        try:
-            resp_pdf = await client.get(url)
-            
-            # Verifica redirects (caso o login tenha falhado silenciosamente)
-            if "login" in str(resp_pdf.url):
-                print("[PDF] O sistema redirecionou para o login. As credenciais podem estar erradas.")
-                raise ValueError("Redirecionado para Login")
+        final_url = urljoin(INLABS_BASE_URL, target_href)
+        print(f"[PDF] Link REAL encontrado: {final_url}")
 
-            if resp_pdf.status_code != 200:
-                print(f"[PDF] Erro no download: HTTP {resp_pdf.status_code}")
-                raise ValueError(f"HTTP {resp_pdf.status_code}")
+        # --- 4. BAIXAR ---
+        print("[PDF] Baixando arquivo real...")
+        resp_file = await client.get(final_url)
+        
+        # Validação final
+        content_type = resp_file.headers.get("content-type", "").lower()
+        if "text/html" in content_type:
+            raise ValueError("O InLabs retornou HTML (possível queda de sessão).")
 
-            # Verifica se baixou um HTML (erro de login) ou PDF real
-            content_type = resp_pdf.headers.get("content-type", "")
-            if "text/html" in content_type and len(resp_pdf.content) < 50000:
-                print("[PDF] Alerta: O arquivo baixado parece ser uma página HTML, não um PDF. Verifique login.")
+        with open(path, "wb") as f:
+            f.write(resp_file.content)
             
-            with open(path, "wb") as f:
-                f.write(resp_pdf.content)
-                
-            size_kb = os.path.getsize(path) / 1024
-            print(f"[PDF] Download concluído: {size_kb:.2f} KB")
-            
-            if size_kb < 10:
-                print("[PDF] Arquivo muito pequeno. Provavelmente corrompido ou link errado.")
-                
-            return path
-            
-        except Exception as e:
-            print(f"[PDF] Falha no download do arquivo: {e}")
-            if os.path.exists(path): os.remove(path)
-            raise e
+        size_kb = os.path.getsize(path) / 1024
+        print(f"[PDF] Download Sucesso: {size_kb:.2f} KB")
+        
+        return path
 
 def extract_text_from_page(page) -> str:
     return page.get_text("text")
 
 async def analyze_pdf_content(pdf_path: str, model) -> List[Dict]:
     results = []
-    
     try:
         doc = fitz.open(pdf_path)
     except Exception as e:
-        print(f"[PDF] Erro ao abrir arquivo local ({pdf_path}): {e}")
+        print(f"[PDF] Erro Fitz: {e}")
         return []
     
-    print(f"📄 PDF carregado. Total páginas: {len(doc)}")
+    print(f"📄 PDF Aberto. Páginas: {len(doc)}")
     
     tasks = []
-    
-    # Prepara strings de busca
     mpo_triggers = ["ministério do planejamento", "ministério da fazenda", "secretaria de orçamento", "tesouro nacional"]
     general_triggers = KEYWORDS_DIRECT + KEYWORDS_BUDGET
-
-    max_pages = 60 # Segurança
-    count = 0
+    max_pages = 60 
 
     for i, page in enumerate(doc):
         text_lower = extract_text_from_page(page).lower()
@@ -237,15 +196,14 @@ async def analyze_pdf_content(pdf_path: str, model) -> List[Dict]:
             prompt = PROMPT_ESPECIALISTA_MPO if is_mpo_mf else PROMPT_GERAL_MB
             ctx = "MPO" if is_mpo_mf else "GERAL"
             tasks.append(run_gemini_analysis(page.get_text(), model, prompt, i+1, ctx))
-            count += 1
-            if count >= max_pages: break
+            if len(tasks) >= max_pages: break
 
     if not tasks:
-        print("[PDF] Nenhuma página relevante encontrada.")
+        print("[PDF] Nada relevante encontrado na triagem.")
         doc.close()
         return []
 
-    print(f"[IA] Analisando {len(tasks)} páginas...")
+    print(f"[IA] Analisando {len(tasks)} páginas selecionadas...")
     chunk_size = 5
     for i in range(0, len(tasks), chunk_size):
         chunk = tasks[i:i + chunk_size]
