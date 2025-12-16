@@ -1,194 +1,225 @@
 # Nome do arquivo: dou_pdf_reader.py
-# Versão: 1.0 (PDF Híbrido + Prompt Especialista)
+# Versão: 2.0 (Lógica Exaustiva MPO + Tags)
 
 import fitz  # PyMuPDF
 import httpx
 import os
-import re
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Optional
 import google.generativeai as genai
 
-# --- SEU PROMPT ESPECIALISTA (Idêntico ao fornecido) ---
+# ==============================================================================
+# 1. LISTAS DE INTERESSE ESTRATÉGICO
+# ==============================================================================
+
+# UGs da Marinha/Defesa (Tags Críticas)
+NAVY_UGS = {
+    "52131": "Comando da Marinha",
+    "52133": "SECIRM",
+    "52232": "CCCPM",
+    "52233": "AMAZUL",
+    "52931": "Fundo Naval",
+    "52932": "Fundo Ensino Profissional Marítimo",
+    "52000": "Ministério da Defesa" # (Monitorar Movimentação)
+}
+
+# Palavras-chave de Interesse Direto (Geral)
+KEYWORDS_DIRECT = [
+    "ministério da defesa", "forças armadas", "autoridade marítima", "comando da marinha",
+    "marinha do brasil", "fundo naval", "amazônia azul", "ccçpm", "emgepron",
+    "fundos públicos", "rardp", "programação orçamentária e financeira",
+    "dpof", "programa nuclear", "plano plurianual", "lei orçamentária",
+    "nuclep", "submarino", "tamandaré", "patrulha"
+]
+
+# Palavras-chave Orçamentárias (Geral - Captura ampla)
+KEYWORDS_BUDGET = [
+    "crédito suplementar", "limite de pagamento", "crédito extraordinário",
+    "execução orçamentária", "reforço de dotações", "orçamento fiscal",
+    "altera grupos de natureza", "limites de movimentação", "fontes de recursos",
+    "movimentação e empenho", "gestão fiscal", "contingenciamento", "bloqueio"
+]
+
+# ==============================================================================
+# 2. PROMPTS ESPECÍFICOS
+# ==============================================================================
+
 PROMPT_ESPECIALISTA_MPO = """
 ### ROLE
 Você é um Especialista em Análise Orçamentária e Defesa (Marinha do Brasil).
 
-### DIRETRIZES DE BUSCA DE ENTIDADES (UOs)
-Busque especificamente pelas UGs:
-- "52131" (Comando da Marinha), "52133" (SECIRM), "52232" (CCCPM), "52233" (AMAZUL)
-- "52931" (Fundo Naval), "52932" (Fundo Ensino), "52000" (MD - Apenas p/ Movimentação)
+### TAREFA
+Analise esta página do DOU (Ministério do Planejamento/Fazenda).
+Verifique se há menção às seguintes UGs (Tags):
+- 52131 (Comando da Marinha)
+- 52133 (SECIRM)
+- 52232 (CCCPM)
+- 52233 (AMAZUL)
+- 52931 (Fundo Naval)
+- 52932 (Fundo Ensino)
+- 52000 (MD - Apenas p/ Movimentação/Limites)
 
-### REGRA DE EXAUSTIVIDADE
-Liste TODAS as Portarias do MPO e MF encontradas nesta página.
-- Se citar UOs da MB -> Tipos 1, 2, 3 ou 4.
-- Se NÃO citar UOs da MB -> Tipo 5 (Sem Impacto).
+### REGRAS DE DECISÃO
+1. Se encontrar qualquer uma das UGs acima com valores (Suplementação, Crédito, Fontes):
+   -> Classifique como TIPO 1, 2, 3 ou 4.
+   -> Extraia os valores exatos.
 
-### REGRAS DE CLASSIFICAÇÃO (Resumo)
-TIPO 1: Crédito Suplementar (Com Impacto MB)
-TIPO 2: Movimentação e Empenho (Com Impacto MD)
-TIPO 3: Alteração de GND (Com Impacto MB)
-TIPO 4: Modificação de Fontes (Com Impacto MB)
-TIPO 5: Sem Impacto (Genérico MPO/MF)
+2. Se NÃO encontrar as UGs acima, mas for uma Portaria de Crédito/Orçamento do MPO/MF:
+   -> Classifique como TIPO 5 (Sem Impacto).
+   -> Resumo obrigatório: "Para conhecimento. Sem impacto para a Marinha."
 
-### FORMATO DE SAÍDA (Rigoroso)
-Para cada ato encontrado, gere a saída exata abaixo (sem markdown json, apenas o texto):
-
+### FORMATO DE SAÍDA (Apenas o texto abaixo, sem markdown extra)
 ▶️ [Órgão Emissor]
 📌 [NOME DA PORTARIA]
-[Resumo breve]
-⚓ [Análise conforme Tipo]
+[Breve resumo do que trata a portaria]
+⚓ [Sua Análise aqui: "MB: ✅ Suplementações..." OU "MB: Para conhecimento. Sem impacto..."]
 """
 
-# Prompt mais simples para capturas gerais (Licitações, Avisos, etc.)
 PROMPT_GERAL_MB = """
-Você é um analista da Marinha. Encontrei menções à Marinha/Defesa neste texto.
-Faça um resumo de 1 frase para relatório WhatsApp.
-Comece com: "▶️ [Órgão] - [Tipo do Ato]"
+Você é um analista da Marinha. Encontrei termos de interesse (Defesa, Submarino, Fundo Naval, etc) nesta página.
+Faça um resumo executivo de 2 linhas para WhatsApp.
+Comece com: "▶️ [Órgão] - [Assunto]"
 Termine com: "⚓ [Impacto/Resumo]"
 """
 
-# --- CONFIGURAÇÃO ---
-IN_GOV_URL = "https://www.in.gov.br/leitura-jornal"
-DOWNLOAD_DIR = "/tmp"  # No Render, usar /tmp
+# ==============================================================================
+# 3. FUNÇÕES DO LEITOR
+# ==============================================================================
 
 async def get_pdf_link_for_date(date_str: str, section: str = "do1") -> Optional[str]:
-    """
-    Busca o link do PDF completo da seção no in.gov.br
-    date_str: YYYY-MM-DD
-    """
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    date_formatted = dt.strftime("%d-%m-%Y")
-    
-    params = {"data": date_formatted, "secao": section}
-    
-    async with httpx.AsyncClient() as client:
-        # Primeiro acessa a página de leitura para pegar o JSON de configuração interna
-        # Nota: A URL real do PDF segue um padrão, vamos tentar montar direto primeiro, 
-        # se falhar, precisaríamos de um scraper mais complexo (Selenium/Soup), 
-        # mas geralmente o padrão é:
-        # https://ens-cdn.in.gov.br/imprensa/jornal/{YYYY}/{MM}/{DD}/{SECAO}/pdf/jornal-{YYYY}-{MM}-{DD}-{SECAO}.pdf
-        # Vamos tentar construir o link direto primeiro (é mais rápido).
-        
-        base_cdn = "https://ens-cdn.in.gov.br/imprensa/jornal"
+    """Tenta construir o link do PDF. Retorna None se falhar."""
+    try:
         ano, mes, dia = date_str.split("-")
+        base_cdn = "https://ens-cdn.in.gov.br/imprensa/jornal"
         
-        # O nome do arquivo pode variar (ex: jornal-2025-01-01-do1.pdf ou principal.pdf)
-        # Vamos tentar o padrão mais comum do CDN
+        # Tentativa 1: Link Padrão
         url_candidate = f"{base_cdn}/{ano}/{mes}/{dia}/{section}/pdf/jornal-{ano}-{mes}-{dia}-{section}.pdf"
         
-        try:
-            head = await client.head(url_candidate)
-            if head.status_code == 200:
+        # Verifica se o link existe (HEAD request)
+        async with httpx.AsyncClient(timeout=10, verify=False) as client:
+            resp = await client.head(url_candidate)
+            if resp.status_code == 200:
+                print(f"[PDF Check] Link encontrado: {url_candidate}")
                 return url_candidate
-        except:
-            pass
-            
+            else:
+                print(f"[PDF Check] Link não acessível ({resp.status_code}): {url_candidate}")
+                
+                # Tentativa 2: Às vezes o arquivo chama 'principal.pdf' em pastas antigas
+                # Mas para 2024/2025 o padrão acima é o correto.
+                return None
+    except Exception as e:
+        print(f"[PDF Check] Erro ao gerar link: {e}")
         return None
 
 async def download_pdf(url: str, filename: str) -> str:
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    async with httpx.AsyncClient(timeout=60) as client:
+    path = os.path.join("/tmp", filename) # Render usa /tmp
+    # Se estiver local (Windows), usa pasta local
+    if os.name == 'nt': 
+        path = filename
+
+    async with httpx.AsyncClient(timeout=90, verify=False) as client:
+        print(f"[Download] Baixando {url}...")
         resp = await client.get(url)
         with open(path, "wb") as f:
             f.write(resp.content)
     return path
 
 def extract_text_from_page(page) -> str:
-    """Extrai texto preservando um pouco do layout físico"""
     return page.get_text("text")
 
 async def analyze_pdf_content(pdf_path: str, model) -> List[Dict]:
-    """
-    Lógica Híbrida:
-    1. Abre PDF.
-    2. Varre páginas.
-    3. Filtra páginas de interesse (MPO/MF ou Keywords MB).
-    4. Envia para Gemini.
-    """
     results = []
-    doc = fitz.open(pdf_path)
+    
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"Erro ao abrir PDF: {e}")
+        return []
     
     print(f"📄 PDF carregado. Total páginas: {len(doc)}")
     
-    # Keywords para gatilho RÁPIDO (sem gastar token de IA)
-    kw_mpo = ["ministério do planejamento", "ministério da fazenda", "secretaria do orçamento", "tesouro nacional"]
-    kw_mb = ["comando da marinha", "fundo naval", "prosub", "nuclear", "tamandaré", "emgepron", "amazul", "secirm"]
-    
     tasks = []
     
+    # Prepara strings de busca (lowercase para performance)
+    mpo_triggers = ["ministério do planejamento", "ministério da fazenda", "secretaria de orçamento", "tesouro nacional"]
+    
+    # Combina keywords gerais para busca rápida
+    general_triggers = KEYWORDS_DIRECT + KEYWORDS_BUDGET
+
     for i, page in enumerate(doc):
-        text = extract_text_from_page(page).lower()
+        text_lower = extract_text_from_page(page).lower()
         
-        # Lógica 1: É MPO ou Fazenda? (Prioridade Alta - Prompt Especialista)
-        is_mpo = any(k in text for k in kw_mpo) and ("portaria" in text or "decreto" in text)
+        # --- LÓGICA DE TRIAGEM (O Bibliotecário) ---
         
-        # Lógica 2: É menção à Marinha (Geral)?
-        is_mb = any(k in text for k in kw_mb)
+        # 1. É MPO ou Fazenda? (CRÍTICO - SEMPRE ANALISAR)
+        is_mpo_mf = any(t in text_lower for t in mpo_triggers)
         
-        if is_mpo:
-            # Envia página para Gemini com Prompt Especialista
-            raw_text = page.get_text() # Pega texto original (case sensitive)
-            tasks.append(run_gemini_analysis(raw_text, model, PROMPT_ESPECIALISTA_MPO, i+1, "MPO"))
+        # 2. Tem menção direta à Marinha/Defesa ou Orçamento? (RELEVANTE)
+        # Só verifica se NÃO for MPO (para não duplicar)
+        is_general_interest = False
+        if not is_mpo_mf:
+            is_general_interest = any(k in text_lower for k in general_triggers)
+
+        # --- AÇÃO ---
+        
+        if is_mpo_mf:
+            # Envia para IA com Prompt Especialista (que sabe lidar com Tipo 5)
+            # Passamos o texto cru (case sensitive) para a IA ler melhor
+            tasks.append(run_gemini_analysis(page.get_text(), model, PROMPT_ESPECIALISTA_MPO, i+1, "MPO"))
             
-        elif is_mb:
-            # Envia página para Gemini com Prompt Resumo
-            raw_text = page.get_text()
-            tasks.append(run_gemini_analysis(raw_text, model, PROMPT_GERAL_MB, i+1, "GERAL"))
-            
-    # Executa em paralelo (cuidado com Rate Limit do Gemini, talvez precise de semáforo)
-    # Vamos processar em lotes de 5 para não estourar
-    chunk_size = 5
+        elif is_general_interest:
+            # Envia para IA com Prompt Geral
+            tasks.append(run_gemini_analysis(page.get_text(), model, PROMPT_GERAL_MB, i+1, "GERAL"))
+
+    # Processa em lotes para não estourar a API
+    chunk_size = 10 
     for i in range(0, len(tasks), chunk_size):
         chunk = tasks[i:i + chunk_size]
-        chunk_results = await asyncio.gather(*chunk)
-        for res in chunk_results:
-            if res:
-                results.append(res)
+        if chunk:
+            print(f"[IA] Processando lote de páginas {i} a {i+len(chunk)}...")
+            chunk_results = await asyncio.gather(*chunk)
+            for res in chunk_results:
+                if res: results.append(res)
                 
     doc.close()
     return results
 
 async def run_gemini_analysis(text: str, model, prompt_template: str, page_num: int, context_type: str) -> Optional[Dict]:
     try:
-        full_prompt = f"{prompt_template}\n\n--- TEXTO DA PÁGINA {page_num} DO DOU ---\n{text[:10000]}"
+        # Verifica se tem conteúdo mínimo
+        if len(text) < 50: return None
+
+        full_prompt = f"{prompt_template}\n\n--- CONTEÚDO DA PÁGINA {page_num} ---\n{text[:15000]}"
         
-        # Gera resposta
         response = await model.generate_content_async(full_prompt)
         analysis = response.text.strip()
         
-        # Se for MPO, filtramos "Sem impacto" se quisermos limpar o output
-        if context_type == "MPO" and "Sem impacto para a Marinha" in analysis and "TIPO 5" in analysis:
-             # Opcional: Se quiser ignorar os "Sem impacto", retorne None aqui.
-             # Mas seu prompt pede para listar, então vamos manter.
-             pass
-
-        # Cria objeto estruturado para o Frontend
-        # O frontend espera: organ, type, summary, relevance_reason
+        # Filtro de qualidade da resposta
+        if not analysis or "Erro" in analysis: return None
         
-        # Tenta extrair o Órgão e Título da resposta da IA para ficar bonitinho no Card
-        organ = "DOU (IA)"
+        # Se for MPO e a IA disse "Sem impacto", nós MANTEMOS (conforme seu pedido),
+        # mas podemos descartar se a IA alucinar e não seguir o padrão.
+        
+        # Parse básico para identificar Órgão e Título
+        organ = "DOU (Seção 1)"
         title = f"Página {page_num}"
         
-        # Parse simples da saída padronizada
-        if "▶️" in analysis:
-            lines = analysis.split("\n")
-            for line in lines:
-                if "▶️" in line: organ = line.replace("▶️", "").strip()
-                if "📌" in line: title = line.replace("📌", "").strip()
-                break
-        
+        lines = analysis.split("\n")
+        for line in lines:
+            if "▶️" in line: organ = line.replace("▶️", "").strip()
+            if "📌" in line: title = line.replace("📌", "").strip()
+
         return {
             "organ": organ,
             "type": title,
-            "summary": analysis, # O texto formatado vai aqui
-            "relevance_reason": f"Análise IA (Pág {page_num}) - {context_type}",
+            "summary": analysis, # O texto completo gerado pela IA
+            "relevance_reason": f"IA (Pág {page_num})",
             "section": "DO1",
             "clean_text": text,
             "is_mpo_navy_hit": (context_type == "MPO")
         }
 
     except Exception as e:
-        print(f"Erro Gemini Pág {page_num}: {e}")
+        print(f"Erro IA Pág {page_num}: {e}")
         return None
