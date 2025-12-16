@@ -1,5 +1,5 @@
 # Nome do arquivo: dou_pdf_reader.py
-# Versão: 3.0 (InLabs Authenticated PDF)
+# Versão: 3.1 (Correção de Rota de Login InLabs)
 
 import fitz  # PyMuPDF
 import httpx
@@ -13,7 +13,6 @@ import google.generativeai as genai
 # ==============================================================================
 # CONFIGURAÇÃO DE CREDENCIAIS INLABS
 # ==============================================================================
-# Tenta carregar do config.json ou variáveis de ambiente
 INLABS_USER = os.environ.get("INLABS_USER")
 INLABS_PASS = os.environ.get("INLABS_PASS")
 
@@ -26,7 +25,8 @@ if not INLABS_USER or not INLABS_PASS:
     except:
         pass
 
-INLABS_LOGIN_URL = "https://inlabs.in.gov.br/login"
+# URL CORRIGIDA PARA O ENDPOINT REAL DE LOGIN DO INLABS
+INLABS_LOGIN_URL = "https://inlabs.in.gov.br/logar.php" 
 INLABS_BASE_URL = "https://inlabs.in.gov.br"
 
 # ==============================================================================
@@ -151,14 +151,16 @@ async def download_pdf(url: str, filename: str) -> str:
             # Acessa home para pegar cookies
             await client.get(INLABS_BASE_URL)
             
-            # Post Login
+            # Post Login - CORRIGIDO PARA 'senha' E URL 'logar.php'
             resp_login = await client.post(
                 INLABS_LOGIN_URL, 
-                data={"email": INLABS_USER, "password": INLABS_PASS}
+                data={"email": INLABS_USER, "senha": INLABS_PASS}
             )
             
+            # logar.php geralmente redireciona (302) ou retorna 200.
             if resp_login.status_code >= 400:
                 print(f"[PDF] Falha no login: {resp_login.status_code}")
+                # Às vezes retorna 404 se a rota estiver errada, mas logar.php deve existir.
                 raise ValueError("Falha Login InLabs")
                 
         except Exception as e:
@@ -170,9 +172,13 @@ async def download_pdf(url: str, filename: str) -> str:
         try:
             resp_pdf = await client.get(url)
             
+            # Verifica redirects (caso o login tenha falhado silenciosamente)
+            if "login" in str(resp_pdf.url):
+                print("[PDF] O sistema redirecionou para o login. As credenciais podem estar erradas.")
+                raise ValueError("Redirecionado para Login")
+
             if resp_pdf.status_code != 200:
                 print(f"[PDF] Erro no download: HTTP {resp_pdf.status_code}")
-                # Às vezes o InLabs redireciona para login se a sessão cair
                 raise ValueError(f"HTTP {resp_pdf.status_code}")
 
             # Verifica se baixou um HTML (erro de login) ou PDF real
