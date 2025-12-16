@@ -10,3 +10,4 @@ numpy
 orcamentobr
 requests
 pydantic
+pymupdf
