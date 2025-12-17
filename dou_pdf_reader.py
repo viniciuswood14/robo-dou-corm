@@ -1,5 +1,5 @@
 # Nome do arquivo: dou_pdf_reader.py
-# Versão: 7.0 (Prompts Rígidos - Estilo Manual)
+# Versão: 8.0 (Smart Crawler - Prioriza Edição Normal vs Extra)
 
 import fitz  # PyMuPDF
 import httpx
@@ -48,47 +48,40 @@ KEYWORDS_BUDGET = [
 ]
 
 # ==============================================================================
-# 2. PROMPTS RÍGIDOS (LOBOTOMIA NA IA)
+# 2. PROMPTS
 # ==============================================================================
 
-# Prompt para MPO/MF (Foco em Orçamento)
 PROMPT_ESPECIALISTA_MPO = """
-Você é um extrator de dados orçamentários. NÃO converse. NÃO explique.
+Você é um extrator de dados. NÃO converse.
 
-ANALISE ESTA PÁGINA EM BUSCA DE PORTARIAS DO MPO OU FAZENDA.
+ANALISE ESTA PÁGINA (MPO/FAZENDA).
+REGRAS:
+1. Busque UGs: 52131, 52133, 52232, 52233, 52931, 52932, 52000.
+2. Extraia: Valor, Ação, Tipo (Suplementação/Cancelamento) e Nº do Pedido/NUP.
+3. Se for MPO/MF mas SEM citação da MB -> Responda apenas: TIPO 5.
 
-REGRAS DE EXTRAÇÃO:
-1. Busque menções às UGs: 52131, 52133, 52232, 52233, 52931, 52932, 52000.
-2. Se encontrar, extraia: 
-   - Número do "Pedido" ou "NUP" (se houver).
-   - Ação (ex: 2004, 20RP).
-   - Tipo de movimento (Suplementação, Cancelamento, Alteração de Fonte).
-3. Se for Portaria do MPO/MF mas NÃO citar a Marinha/Defesa: Classifique como TIPO 5.
-
-SAÍDA OBRIGATÓRIA (Se nada relevante, responda apenas NULL):
-
+SAÍDA OBRIGATÓRIA (Use exatamente este layout):
 ▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA]
-[Resumo Seco de 1 linha sobre o que a portaria faz]
-⚓ MB: [Se houver impacto: "Atendimento do Pedido nº XXX. Ação XXX - Tipo. Valor: R$ XXX"] [Se não houver impacto: "Para conhecimento. Sem impacto para a Marinha."]
+📌 [NOME DA PORTARIA OU ATO]
+[Resumo técnico direto de 1 linha]
+⚓ MB: [Se houver impacto: Detalhes financeiros] [Se não houver: Para conhecimento. Sem impacto.]
 """
 
-# Prompt Geral (Foco em Assuntos Estratégicos)
 PROMPT_GERAL_MB = """
-Você é um filtro de inteligência. NÃO converse.
-Analise o texto. Se houver menção explícita a "Marinha do Brasil", "Comando da Marinha", "Submarino", "Nuclear" ou "Defesa":
-Gere o resumo.
+Você é um filtro de inteligência.
+Se houver menção explícita a "Marinha", "Defesa", "Submarino" ou "Nuclear":
+Gere o resumo no layout abaixo.
 CASO CONTRÁRIO, RESPONDA APENAS: NULL
 
 SAÍDA:
 ▶️ [Órgão]
-📌 [Título do Ato]
-[Resumo de 1 linha]
-⚓ [Impacto para a MB]
+📌 [Título]
+[Resumo técnico de 1 linha]
+⚓ MB: [Análise de Impacto]
 """
 
 # ==============================================================================
-# 3. FUNÇÕES (CRAWLER + FILTRO NULL)
+# 3. FUNÇÕES (SMART CRAWLER)
 # ==============================================================================
 
 async def get_pdf_link_for_date(date_str: str, section: str = "do1") -> Optional[str]:
@@ -104,32 +97,54 @@ async def download_pdf(date_str: str, filename: str) -> str:
     headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
 
     async with httpx.AsyncClient(timeout=60, verify=False, headers=headers, follow_redirects=True) as client:
+        # Login
         print(f"[PDF] Logando no InLabs ({INLABS_USER})...")
         await client.get(INLABS_BASE_URL)
         await client.post(INLABS_LOGIN_URL, data={"email": INLABS_USER, "password": INLABS_PASS, "senha": INLABS_PASS})
         
+        # Acessa Página do Dia
         day_url = f"{INLABS_BASE_URL}/index.php?p={date_str}"
         print(f"[PDF] Acessando índice: {day_url}")
         resp_page = await client.get(day_url)
         
         soup = BeautifulSoup(resp_page.text, "html.parser")
-        target_href = None
-        for a in soup.find_all("a", href=True):
-            if ".pdf" in a["href"].lower() and ("do1" in a["href"].lower() or "secao_1" in a["href"].lower()):
-                target_href = a["href"]
-                break
         
-        if not target_href:
-            # Fallback forçado
+        # --- LÓGICA DE SELEÇÃO INTELIGENTE (NOVO) ---
+        candidates = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].lower()
+            # Filtra tudo que é PDF da Seção 1
+            if ".pdf" in href and ("do1" in href or "secao_1" in href):
+                candidates.append(a["href"]) # Guarda o link original (case sensitive)
+
+        if not candidates:
+            # Fallback direto se não achar nada no HTML
+            print("[PDF] Nenhum link encontrado no Crawler. Tentando força bruta...")
             dt = datetime.strptime(date_str, "%Y-%m-%d")
             target_href = f"index.php?p={date_str}&dl={dt.strftime('%Y_%m_%d')}_ASSINADO_do1.pdf"
-        
+        else:
+            # Seleciona o melhor candidato
+            target_href = None
+            
+            # Prioridade 1: Link que NÃO tem "extra" e NÃO tem "suplemento"
+            for c in candidates:
+                if "extra" not in c.lower() and "suplemento" not in c.lower():
+                    target_href = c
+                    print(f"[PDF] Edição Principal detectada: {c}")
+                    break
+            
+            # Prioridade 2: Se não achou principal, pega o primeiro da lista (pode ser Extra)
+            if not target_href:
+                target_href = candidates[0]
+                print(f"[PDF] Apenas edições extras/suplementares encontradas. Usando: {target_href}")
+
         final_url = urljoin(INLABS_BASE_URL, target_href)
         print(f"[PDF] Baixando: {final_url}")
+        
         resp_file = await client.get(final_url)
         
         if "text/html" in resp_file.headers.get("content-type", "") or len(resp_file.content) < 15000:
-            raise ValueError("Falha: InLabs retornou HTML ou arquivo inválido.")
+            raise ValueError("Falha: InLabs retornou HTML ou arquivo inválido (Login caiu ou arquivo não existe).")
 
         with open(path, "wb") as f: f.write(resp_file.content)
         return path
@@ -148,14 +163,10 @@ async def analyze_pdf_content(pdf_path: str, model) -> List[Dict]:
     mpo_triggers = ["ministério do planejamento", "ministério da fazenda", "secretaria de orçamento", "tesouro nacional"]
     general_triggers = KEYWORDS_DIRECT + KEYWORDS_BUDGET
     
-    # Reduzi para analisar apenas páginas que realmente importam para economizar tempo/token
-    # Mas mantendo o pente fino nas de orçamento
-    
     for i, page in enumerate(doc):
         text_lower = extract_text_from_page(page).lower()
         
         is_mpo_mf = any(t in text_lower for t in mpo_triggers)
-        # Só ativa o geral se tiver keyword MUITO forte
         is_general_interest = False
         if not is_mpo_mf:
             is_general_interest = any(k in text_lower for k in general_triggers)
@@ -188,25 +199,28 @@ async def run_gemini_analysis(text: str, model, prompt_template: str, page_num: 
         response = await model.generate_content_async(full_prompt)
         analysis = response.text.strip()
         
-        # --- FILTRO RIGOROSO ---
-        # Se a IA respondeu NULL ou algo vazio, ignoramos
-        if not analysis or "NULL" in analysis or len(analysis) < 10:
-            return None
-            
-        # Removemos conversas caso a IA ainda teime em falar
-        clean_analysis = analysis.replace("Compreendido.", "").replace("Aqui está o resumo:", "").strip()
+        if not analysis or "NULL" in analysis or len(analysis) < 10: return None
 
+        lines = analysis.split("\n")
         organ = "DOU"
         title = f"Página {page_num}"
-        
-        for line in clean_analysis.split("\n"):
-            if "▶️" in line: organ = line.replace("▶️", "").strip()[:60]
-            if "📌" in line: title = line.replace("📌", "").strip()[:100]
+        clean_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if line.startswith("▶️"): organ = line.replace("▶️", "").strip()
+            elif line.startswith("📌"): title = line.replace("📌", "").strip()
+            else:
+                if not line.startswith("Compreendido") and not line.startswith("Aqui está"):
+                    clean_lines.append(line)
+
+        final_summary = "\n".join(clean_lines).strip()
 
         return {
             "organ": organ, 
             "type": title, 
-            "summary": clean_analysis, # Manda o texto formatado pelo prompt
+            "summary": final_summary,
             "relevance_reason": f"Pág {page_num}", 
             "section": "DO1",
             "clean_text": text, 
