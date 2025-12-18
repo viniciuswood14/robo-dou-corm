@@ -61,6 +61,11 @@ except ImportError:
     print("Aviso: 'dou_fallback.py' não encontrado. Redundância desativada.")
     executar_fallback = None
 
+# ... outros imports
+try:
+    from check_legislativo import check_tramitacoes_watchlist, check_and_process_legislativo
+except ImportError:
+    pass
 
 # --- CONFIGURAÇÃO DO ESTADO (DOU) ---
 STATE_FILE_PATH = os.environ.get("STATE_FILE_PATH", "/dados/processed_state.json")
@@ -324,7 +329,26 @@ async def main_loop():
         hoje_str = agora.strftime('%Y-%m-%d')
         ano_str = agora.strftime('%Y')
         ontem_str = (agora - timedelta(days=1)).strftime('%Y-%m-%d')
-        
+        current_hour_str = agora.strftime('%H')
+            
+            # Variável de controle (adicione 'legis_last_run_hour = None' antes do while)
+            if 'legis_last_run_hour' not in locals():
+                legis_last_run_hour = None
+
+            if is_weekday and agora.minute >= 30 and legis_last_run_hour != current_hour_str:
+                try:
+                    print(f"--- Iniciando Check Legislativo ({agora.strftime('%H:%M')}) ---")
+                    # 1. Verifica tramitações da Watchlist (Envia Telegram se mudar)
+                    await check_tramitacoes_watchlist()
+                    
+                    # 2. (Opcional) Busca novos projetos gerais de interesse
+                    # await check_and_process_legislativo(only_new=True) 
+                    
+                    legis_last_run_hour = current_hour_str # Marca que já rodou nesta hora
+                    print("--- Check Legislativo Finalizado ---")
+                except Exception as e:
+                    print(f"Erro Legislativo: {e}")
+                    
         # Reseta flags diárias
         if last_day != hoje_str:
             valor_check_done = False
