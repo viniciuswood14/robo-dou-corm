@@ -137,24 +137,14 @@ Você deve listar **TODAS** as Portarias do MPO e MF encontradas no documento qu
 Analise cada ato e classifique em um dos 5 tipos abaixo:
 
 #### TIPO 1: Crédito Suplementar (Com Impacto MB)
-- **Gatilho:** Abertura de crédito onde aparecem as UOs da MB.
-- **Formato de Saída:**
-▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA, DATA]
-[Resumo do texto da lei]
-⚓ MB:
+ MB:
 ✅Suplementações (Total) – R$ [Valor Total MB]
 [Código Ação] ([Sigla]): R$ [Valor]
 ✅Cancelamentos (Total) – R$ [Valor Total MB]
 [Unidade] AO [Código] [Nome da Ação]: R$ [Valor]
 
 #### TIPO 2: Movimentação e Empenho (Com Impacto MD)
-- **Gatilho:** Alteração de limites/cronograma onde aparece o Ministério da Defesa (52000).
-- **Formato de Saída:**
-▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA, DATA]
-[Resumo do texto]
-⚓ MD:
+ MD:
 ✅Ampliação do Limite de Movimentação e Empenho:
 RP2: R$ [Valor]
 RP3: R$ [Valor]
@@ -163,53 +153,16 @@ RP3: R$ [Valor]
 (Adicionar frase padrão: "Valores atinentes à MB serão confirmados ao longo do dia.")
 
 #### TIPO 3: Alteração de GND (Com Impacto MB)
-- **Gatilho:** Alteração de GND no mesmo subtítulo envolvendo UOs da MB.
-- **Formato de Saída:**
-▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA, DATA]
-[Resumo]
-⚓ Alteração GND [X] para [Y]:
+ Alteração GND [X] para [Y]:
 [Código Ação] - [Nome] - R$ [Valor]
 
 #### TIPO 4: Modificação de Fontes (Com Impacto MB)
-- **Gatilho:** Alteração de fontes envolvendo UOs da MB.
-- **Formato de Saída:**
-▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA, DATA]
-[Resumo]
-⚓ Alteração de Fonte:
+Alteração de Fonte:
 Recebe Fonte [X] / Cancela Fonte [Y]: R$ [Valor]
 
 #### TIPO 5: Sem Impacto (Genérico MPO/MF)
-- **Gatilho:** Qualquer portaria do MPO ou MF sobre orçamento que **NÃO** contenha as UOs da Marinha ou Defesa citadas acima.
-- **Formato de Saída:**
-▶️ [Órgão Emissor]
-📌 [NOME DA PORTARIA, DATA]
-[Resumo breve do objeto da portaria]
-⚓ MB: Para conhecimento. Sem impacto para a Marinha.
-
-### MODELO DE ESTILO FINAL
-Sua resposta final deve seguir rigorosamente a estética abaixo:
-
-Bom dia, senhores!
-PTC as seguintes publicações de interesse no DOU de [DATA]:
-
-🔰 Seção 1
-
-▶️ Ministério do Planejamento e Orçamento/Gabinete da Ministra
-📌 PORTARIA GM/MPO Nº 499, DE 12 DE DEZEMBRO DE 2025
-Abre aos Orçamentos Fiscal... (texto resumo) ...vigente.
-⚓ MB:
-✅Suplementações (Total) – R$ 1.001.000.000
-14T7 (PNM): R$ 842.200.000
-✅Cancelamentos (Total) – R$ 445.867.720
-FN AO 0Z00 Reserva de Contingência: R$ 316.383.161
-
-▶️ Ministério do Planejamento e Orçamento/Gabinete da Ministra
-📌 PORTARIA GM/MPO Nº 505, DE 12 DE DEZEMBRO DE 2025
-Abre crédito para o Ministério da Saúde.
-⚓ MB: Para conhecimento. Sem impacto para a Marinha.
-
+ MB: Para conhecimento. Sem impacto para a Marinha.
+ 
 (Repetir para todos os atos encontrados).
 """
 
