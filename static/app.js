@@ -1,147 +1,147 @@
-// frontend/app.js
+document.addEventListener("DOMContentLoaded", function() {
 
-document.addEventListener('DOMContentLoaded', () => {
-    // Definir data de hoje no input
-    const today = new Date().toISOString().split('T')[0];
-    const dateInput = document.getElementById('dateInput');
-    if (dateInput) dateInput.value = today;
+  // 👉 Troque para a URL do seu backend no Render se necessário, ou deixe vazio para relativo:
+  const API_BASE = "";
 
-    // Elementos
-    const btnProcessar = document.getElementById('btnProcessar');
-    const btnIA = document.getElementById('btnIA');
-    const btnFallback = document.getElementById('btnFallback');
-    const btnGuruPopup = document.getElementById('btnGuruPopup'); // Botão do Guru
-    
-    const loadingDiv = document.getElementById('loading');
-    const resultsArea = document.getElementById('results-area');
+  const el = (id) => document.getElementById(id);
+  const btnProcessar = el("btnProcessar");
+  const btnProcessarIA = el("btnProcessarIA");
+  const btnProcessarValor = el("btnProcessarValor");
+  const btnTesteFallback = el("btnTesteFallback");
+  const btnCopiar = el("btnCopiar");
+  const preview = el("preview");
 
-    // Funções de UI
-    const showLoading = () => {
-        if(loadingDiv) loadingDiv.classList.remove('hidden');
-        if(resultsArea) resultsArea.innerHTML = '';
-    };
-
-    const hideLoading = () => {
-        if(loadingDiv) loadingDiv.classList.add('hidden');
-    };
-
-    const renderResults = (data) => {
-        if (!resultsArea) return;
-        resultsArea.innerHTML = '';
-
-        if (!data.publications || data.publications.length === 0) {
-            resultsArea.innerHTML = '<div class="result-card"><p>Nenhuma publicação encontrada.</p></div>';
-            return;
-        }
-
-        // Exibir texto para WhatsApp (Botão Copiar)
-        const zapCard = document.createElement('div');
-        zapCard.className = 'result-card';
-        zapCard.style.borderLeftColor = '#25D366'; // Cor WhatsApp
-        zapCard.innerHTML = `
-            <div class="card-header">
-                <span>Resumo para Mensageria</span>
-                <span>${data.date}</span>
-            </div>
-            <div class="card-body">
-                <h3>Relatório Pronto</h3>
-                <textarea style="width:100%; height:150px; margin-bottom:10px;">${data.whatsapp_text}</textarea>
-                <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value); alert('Copiado!')" style="background:#25D366; width:auto; display:inline-flex;">
-                    <i class="fas fa-copy"></i> Copiar Texto
-                </button>
-            </div>
-        `;
-        resultsArea.appendChild(zapCard);
-
-        // Renderizar Cards Individuais
-        data.publications.forEach(pub => {
-            const div = document.createElement('div');
-            
-            // Define classe baseada na análise
-            let cardClass = 'result-card';
-            if (pub.relevance_reason && pub.relevance_reason.toLowerCase().includes('atenção')) {
-                cardClass += ' atencao';
-            } else {
-                cardClass += ' relevante';
-            }
-
-            div.className = cardClass;
-            div.innerHTML = `
-                <div class="card-header">
-                    <span class="organ">${pub.organ || 'Órgão Desconhecido'}</span>
-                    <span class="section">${pub.section || 'DOU'}</span>
-                </div>
-                <div class="card-body">
-                    <h3>${pub.type || 'Ato'}</h3>
-                    <div class="summary">${pub.summary || 'Sem resumo disponível.'}</div>
-                    
-                    <div class="ia-analysis">
-                        <strong>⚓ Análise:</strong> ${pub.relevance_reason || 'Aguardando análise...'}
-                    </div>
-                    
-                    <div style="margin-top:10px;">
-                        <a href="https://www.in.gov.br/web/dou/-/${encodeURIComponent(pub.type)}-${new Date().getTime()}" target="_blank" style="color:#0077b6; text-decoration:none; font-size:0.9rem;">
-                            <i class="fas fa-external-link-alt"></i> Ver no DOU (Busca)
-                        </a>
-                    </div>
-                </div>
-            `;
-            resultsArea.appendChild(div);
-        });
-    };
-
-    // Função Genérica de Fetch
-    const triggerProcess = async (endpoint) => {
-        showLoading();
-        
-        const formData = new FormData();
-        formData.append('data', dateInput.value);
-        
-        // Seções
-        const sections = [];
-        if(document.getElementById('sec1').checked) sections.push('DO1');
-        if(document.getElementById('sec2').checked) sections.push('DO2');
-        if(document.getElementById('sec3').checked) sections.push('DO3');
-        formData.append('sections', sections.join(','));
-
-        // Keywords
-        const kwInput = document.getElementById('keywordsInput');
-        if(kwInput && kwInput.value) {
-            const kwList = kwInput.value.split(',').map(s => s.trim()).filter(s => s);
-            formData.append('keywords_json', JSON.stringify(kwList));
-        }
-
-        try {
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
-            
-            const data = await response.json();
-            renderResults(data);
-            
-        } catch (error) {
-            resultsArea.innerHTML = `<div class="result-card atencao"><p>Erro ao processar: ${error.message}</p></div>`;
-            console.error(error);
-        } finally {
-            hideLoading();
-        }
-    };
-
-    // Listeners dos Botões Principais
-    if(btnProcessar) btnProcessar.addEventListener('click', () => triggerProcess('/processar-inlabs'));
-    if(btnIA) btnIA.addEventListener('click', () => triggerProcess('/processar-dou-ia'));
-    if(btnFallback) btnFallback.addEventListener('click', () => triggerProcess('/teste-fallback'));
-
-    // --- NOVO: Listener do Botão GURU (Pop-up) ---
-    if(btnGuruPopup) {
-        btnGuruPopup.addEventListener('click', (e) => {
-            e.preventDefault();
-            const url = "https://chatgpt.com/g/g-694097bd22ac819192af5884a4e7f223-analise-do-dou";
-            // Abre janela flutuante de 500px de largura
-            window.open(url, 'GuruOrcamentario', 'width=500,height=750,scrollbars=yes,resizable=yes');
-        });
+  // Valor padrão: hoje
+  (function initDate() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (el("data")) {
+      el("data").value = today;
     }
+  })();
+
+  // Função central de processamento
+  async function handleProcessing(endpoint) {
+    const data = el("data").value.trim();
+    const sections = el("sections").value.trim() || "DO1,DO2";
+    const keywords = el("keywords").value.trim();
+
+    if (!data) {
+      if(preview) preview.textContent = "Informe a data (YYYY-MM-DD).";
+      return;
+    }
+
+    const fd = new FormData();
+    fd.append("data", data);
+    
+    let loadingText = "Processando, aguarde…";
+
+    // Adiciona campos específicos do DOU
+    if (endpoint.startsWith("/processar-dou") || 
+        endpoint.startsWith("/processar-inlabs") || 
+        endpoint.startsWith("/teste-fallback")) {
+      
+      fd.append("sections", sections);
+      
+      if (keywords) {
+        const keywordsList = keywords.split(',')
+          .map(k => k.trim())
+          .filter(k => k.length > 0);
+          
+        if (keywordsList.length > 0) {
+          fd.append("keywords_json", JSON.stringify(keywordsList));
+        }
+      }
+      
+      if(endpoint.includes("fallback")) {
+         loadingText = "Testando busca no DOU Público (in.gov.br)... isso pode levar até 1 min.";
+      } else if(endpoint.includes("-ia")) {
+        loadingText = "Processando DOU com IA no INLABS. Isso pode levar até 2 minutos, aguarde…";
+      } else {
+        loadingText = "Processando DOU (Rápido) no INLABS, aguarde…";
+      }
+    }
+    
+    // Texto específico do Valor
+    if (endpoint.startsWith("/processar-valor")) {
+        loadingText = "Buscando notícias no Valor Econômico e analisando com IA, aguarde…";
+    }
+
+
+    if (btnProcessar) btnProcessar.disabled = true;
+    if (btnProcessarIA) btnProcessarIA.disabled = true;
+    if (btnProcessarValor) btnProcessarValor.disabled = true;
+    if (btnTesteFallback) btnTesteFallback.disabled = true;
+    if (btnCopiar) btnCopiar.disabled = true;
+
+    if (preview) {
+      preview.classList.add("loading");
+      preview.textContent = loadingText;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`, { method: "POST", body: fd }); 
+      const body = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        if(preview) preview.textContent = body?.detail
+          ? `Erro: ${body.detail}`
+          : `Erro HTTP ${res.status}`;
+        return;
+      }
+
+      const texto = body?.whatsapp_text || "(Sem resultados)";
+      if (preview) preview.textContent = texto;
+
+      if (btnCopiar) {
+        btnCopiar.disabled = !texto || texto === "(Sem resultados)";
+      }
+
+    } catch (err) {
+      if (preview) preview.textContent = `Falha na requisição: ${err.message || err}`;
+    } finally {
+      
+      if (btnProcessar) btnProcessar.disabled = false;
+      if (btnProcessarIA) btnProcessarIA.disabled = false;
+      if (btnProcessarValor) btnProcessarValor.disabled = false;
+      if (btnTesteFallback) btnTesteFallback.disabled = false;
+      if (preview) preview.classList.remove("loading");
+    }
+  }
+
+  // Listeners dos botões
+  if (btnProcessar) {
+    btnProcessar.addEventListener("click", () => handleProcessing("/processar-inlabs"));
+  }
+  if (btnProcessarIA) {
+    btnProcessarIA.addEventListener("click", () => handleProcessing("/processar-dou-ia"));
+  }
+  if (btnProcessarValor) {
+    btnProcessarValor.addEventListener("click", () => handleProcessing("/processar-valor-ia"));
+  }
+  if (btnTesteFallback) {
+    btnTesteFallback.addEventListener("click", () => handleProcessing("/teste-fallback"));
+  }
+
+  // Botão Copiar (Atualizado com Feedback Visual)
+  if (btnCopiar) {
+    btnCopiar.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(preview.textContent || "");
+        
+        // Feedback Visual: Pisca a caixa em verde
+        preview.style.backgroundColor = "#d4edda"; 
+        preview.style.transition = "background-color 0.2s";
+        setTimeout(() => {
+            preview.style.backgroundColor = ""; 
+        }, 300);
+
+        // Feedback no Botão
+        btnCopiar.textContent = "Copiado!";
+        setTimeout(() => (btnCopiar.textContent = "Copiar Relatório"), 1200);
+      } catch (err) {
+        alert("Falha ao copiar para a área de transferência.");
+      }
+    });
+  }
+
 });
