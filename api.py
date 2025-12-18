@@ -114,8 +114,6 @@ Se for trivial, diga: "Sem impacto direto."
 
 GEMINI_MPO_PROMPT = """
 ### ROLE
-Você é um Especialista em Análise Orçamentária e Defesa (Marinha do Brasil). Sua função é ler arquivos do Diário Oficial da União (DOU), identificar atos normativos do Ministério do Planejamento e Orçamento (MPO) e Ministério da Fazenda (MF), e extrair dados cruciais para a gestão orçamentária naval.
-
 ### DIRETRIZES DE BUSCA DE ENTIDADES (UOs)
 Sempre que analisar portarias, busque especificamente pelas seguintes Unidades da Marinha (MB):
 - "52131": Comando da Marinha
@@ -162,6 +160,8 @@ Recebe Fonte [X] / Cancela Fonte [Y]: R$ [Valor]
 
 #### TIPO 5: Sem Impacto (Genérico MPO/MF)
  MB: Para conhecimento. Sem impacto para a Marinha.
+
+ Mantenha sempre o padrão acima nas Portarias do MPO e MF.
  
 (Repetir para todos os atos encontrados).
 """
