@@ -1,8 +1,57 @@
-<div class="actions" style="margin-top: 10px;">
-       <button id="btnTesteFallback" style="background-color: #6c757d; border-color: #6c757d;">
-           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-           Testar Fallback (Site Público)
-       </button>
+<<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Robô DOU - Marinha do Brasil</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <a href="index.html" class="back-link">← Voltar para a Página Inicial</a>
+  
+  <main class="card">
+    <header class="card-header">
+      <img src="logo-marinha.png" alt="MB" class="logo" style="max-height: 60px; margin-bottom: 10px;" />
+      <h1>Robô de Monitoramento do DOU</h1>
+    </header>
+
+    <div class="row">
+      <label for="data">Data (YYYY-MM-DD)</label>
+      <input id="data" type="date" />
+    </div>
+
+    <div class="row">
+      <label for="sections">Seções do DOU (separadas por vírgula)</label>
+      <input id="sections" type="text" placeholder="DO1,DO2" value="DO1,DO2" />
+    </div>
+
+    <div class="row">
+      <label for="keywords">Palavras-Chave (opcional)</label>
+      <input id="keywords" type="text" placeholder="AMAZUL, PROSUB, EMGEPRON...">
+    </div>
+
+    <div class="actions">
+      <button id="btnProcessar">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        Processar DOU (Rápido)
+      </button>
+
+      <button id="btnProcessarIA" style="background-color: #005f56; border-color: #005f56;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3C7.5 3 4 4.8 4 7c0 1.8 1.7 3.2 4 3.8V21c0 .6.4 1 1 1h6c.6 0 1-.4 1-1V10.8c2.3-.6 4-2 4-3.8 0-2.2-3.5-4-8-4Z"/><path d="M6 7c0-1 2-2 6-2s6 1 6 2"/></svg>
+        Analisar DOU (IA)
+      </button>
+      
+      <button id="btnProcessarValor" style="background-color: #b95000; border-color: #b95000;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2"/><path d="M8 6h8"/><path d="M8 10h8"/><path d="M8 14h4"/></svg>
+        Analisar Valor (IA)
+      </button>
+    </div>
+
+    <div class="actions" style="margin-top: 10px;">
+        <button id="btnTesteFallback" style="background-color: #6c757d; border-color: #6c757d;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+            Testar Fallback (Site Público)
+        </button>
     </div>
 
     <div class="actions" style="margin-top: 10px;">
@@ -18,14 +67,15 @@
               justify-content: center; 
               gap: 8px; 
               padding: 0.6em 1.2em; 
-              border-radius: 8px; 
+              border-radius: 4px; /* Ajustado para combinar com seus botões padrão */
               font-family: inherit;
               font-weight: 500;
-              font-size: 1em;
+              font-size: 0.9em; /* Ajustado para não ficar gigante */
               cursor: pointer;
               transition: background-color 0.25s;
               width: 100%;
               box-sizing: border-box;
+              text-align: center;
            "
            onmouseover="this.style.backgroundColor='#0d8a6a'"
            onmouseout="this.style.backgroundColor='#10a37f'"
@@ -37,29 +87,16 @@
     <div class="actions" style="margin-top: 10px;">
         <button id="btnCopiar" disabled>Copiar Relatório</button>
     </div>
+    
+    <p class="hint" style="margin-top: 15px; margin-bottom: 20px; font-size: 0.85em; color: #666;">
+      <b>DOU (Rápido):</b> Apenas filtra palavras-chave.<br>
+      <b>DOU (IA):</b> Lê o PDF oficial e analisa impacto estratégico.<br>
+      <b>Análise Profunda:</b> Abre seu GPT personalizado em janela auxiliar.
+    </p>
 
-    ```
+    <pre id="preview" class="preview" aria-live="polite">Aguardando comando...</pre>
+  </main>
 
-### 2. Adicione a função no `app.js`
-
-Abra seu arquivo `app.js` e adicione esta função no final do arquivo. Ela é responsável por abrir a janela "popup" em vez de sair do seu site.
-
-```javascript
-/* --- Função para abrir o GPT em janela flutuante --- */
-function openGptPopup(e, url) {
-  if (e) e.preventDefault();
-  
-  // Define tamanho da janela
-  const width = 1100;
-  const height = 850;
-  
-  // Centraliza na tela do usuário
-  const left = (window.screen.width / 2) - (width / 2);
-  const top = (window.screen.height / 2) - (height / 2);
-  
-  window.open(
-    url, 
-    'GPTWindow', 
-    `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes,status=yes`
-  );
-}
+  <script src="app.js"></script>
+</body>
+</html>
