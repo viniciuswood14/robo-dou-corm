@@ -223,3 +223,32 @@ button svg { stroke: white; }
   cursor: pointer;
   margin-right: 10px;
 }
+/* Adicione/Atualize no frontend/style.css */
+
+/* Botão Guru na Barra de Ações (Menor e Compacto) */
+.btn-guru-action {
+    background-color: #10a37f; /* Verde ChatGPT */
+    color: white;
+    border: 1px solid #0d8a6b;
+}
+
+.btn-guru-action:hover {
+    background-color: #0d8a6b;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+/* Ajuste para garantir que os botões fiquem alinhados */
+.actions-row {
+    display: flex;
+    gap: 10px;       /* Espaço entre botões */
+    margin-top: 15px;
+    flex-wrap: wrap; /* Quebra linha se a tela for pequena */
+}
+
+/* Garante que todos tenham a mesma altura visual */
+.actions-row button {
+    flex: 1; /* Faz os botões ocuparem espaço igual (opcional) */
+    white-space: nowrap;
+    justify-content: center;
+}
