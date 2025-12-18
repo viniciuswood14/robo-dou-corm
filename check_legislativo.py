@@ -276,6 +276,9 @@ def toggle_tracking(item_data: Dict) -> str:
 
 # --- CONSULTA DE TRAMITAÇÕES (NOVO CORE) ---
 # --- ATUALIZAÇÃO DA FUNÇÃO DE TRAMITAÇÕES ---
+# ... (Mantenha os imports e funções anteriores do arquivo)
+
+# --- ATUALIZAÇÃO DA FUNÇÃO DE TRAMITAÇÕES ---
 async def check_tramitacoes_watchlist() -> List[Dict]:
     watchlist = load_watchlist()
     updates = []
