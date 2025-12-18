@@ -275,17 +275,11 @@ def toggle_tracking(item_data: Dict) -> str:
         return "adicionado"
 
 # --- CONSULTA DE TRAMITAÇÕES (NOVO CORE) ---
-# --- ATUALIZAÇÃO DA FUNÇÃO DE TRAMITAÇÕES ---
-# ... (Mantenha os imports e funções anteriores do arquivo)
-
-# --- ATUALIZAÇÃO DA FUNÇÃO DE TRAMITAÇÕES ---
 async def check_tramitacoes_watchlist() -> List[Dict]:
     watchlist = load_watchlist()
     updates = []
     
-    print(f">>> [Legislativo] Verificando tramitações de {len(watchlist)} itens monitorados...")
-
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         for uid, info in watchlist.items():
             try:
                 novo_status = None
@@ -299,16 +293,7 @@ async def check_tramitacoes_watchlist() -> List[Dict]:
                         if dados:
                             # Pega a última tramitação
                             last = dados[-1]
-                            # Formata: Data + Despacho
-                            desc = last.get('despacho') or last.get('descricaoTramitacao')
-                            data_hora = last.get('dataHora', '')[:10]
-                            # Converte data para PT-BR se der
-                            try:
-                                dh = datetime.strptime(data_hora, "%Y-%m-%d")
-                                data_hora = dh.strftime("%d/%m/%Y")
-                            except: pass
-                            
-                            novo_status = f"{data_hora}: {desc}"
+                            novo_status = f"{last.get('dataHora', '')[:10]}: {last.get('despacho') or last.get('descricaoTramitacao')}"
 
                 # 2. Consulta SENADO
                 elif info['casa'] == 'Senado':
@@ -317,34 +302,21 @@ async def check_tramitacoes_watchlist() -> List[Dict]:
                     resp = await client.get(url, headers=headers)
                     if resp.status_code == 200:
                         data = resp.json()
+                        # Navegação no JSON complexo do Senado
                         movs = data.get('MovimentacaoMateria', {}).get('Materia', {}).get('Tramitacoes', {}).get('Tramitacao', [])
-                        if isinstance(movs, dict): movs = [movs]
+                        if isinstance(movs, dict): movs = [movs] # Normaliza se for item único
                         
                         if movs:
-                            # Senado manda lista ordenada (recente primeiro ou ultimo, checar data)
-                            # Geralmente o primeiro da lista é o mais recente na API nova, mas vamos garantir
-                            last = movs[0] 
+                            last = movs[0] # Senado costuma mandar o mais recente primeiro ou ultimo, verificar ordem
+                            # No Senado, geralmente o array vem ordenado. Pegamos o mais recente.
+                            # Mas garantimos ordenação por data se necessário.
                             desc = last.get('IdentificacaoTramitacao', {}).get('DescricaoSituacao') or last.get('TextoTramitacao')
                             data_mov = last.get('DataTramitacao', '')
-                            # Formata Data
-                            try:
-                                dm = datetime.strptime(data_mov, "%Y-%m-%d")
-                                data_mov = dm.strftime("%d/%m/%Y")
-                            except: pass
-                            
                             novo_status = f"{data_mov}: {desc}"
 
-                # Lógica de Detecção de Mudança
-                # Compara o status novo com o que temos salvo
-                current_saved = info.get('last_status', 'Monitoramento Iniciado')
-                
-                if novo_status and novo_status != current_saved:
-                    # EVITA LOOP: Se o status for igual, não faz nada.
-                    # Se for diferente, atualiza e notifica.
-                    
-                    # Log
-                    print(f"   -> Mudança em {info['sigla']} {info['numero']}: {novo_status}")
-                    
+                # Lógica de Atualização
+                if novo_status and novo_status != info.get('last_status'):
+                    # Houve mudança!
                     info['last_status'] = novo_status
                     updates.append({
                         "uid": uid,
@@ -358,25 +330,9 @@ async def check_tramitacoes_watchlist() -> List[Dict]:
                 print(f"Erro ao verificar {uid}: {e}")
                 continue
     
-    # SE HOUVER ATUALIZAÇÕES: Salva e Notifica
+    # Salva os novos status no arquivo para não alertar repetido
     if updates:
         save_watchlist(watchlist)
-        
-        # Monta Mensagem Telegram
-        msg_header = "🔔 *Atualização de Tramitação (Watchlist)*"
-        buffer_msg = [msg_header]
-        
-        for up in updates:
-            item_txt = (
-                f"\n📌 *{up['titulo']}*"
-                f"\n📝 {up['ementa'][:100]}..."
-                f"\n🔄 *Novo Status:* {up['status']}"
-                f"\n🔗 [Acompanhar]({up['link']})"
-            )
-            buffer_msg.append(item_txt)
-            
-        full_msg = "\n".join(buffer_msg)
-        await send_telegram_message(full_msg)
         
     return updates
 
