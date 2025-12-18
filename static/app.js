@@ -10,6 +10,7 @@ document.addEventListener("DOMContentLoaded", function() {
   const btnTesteFallback = el("btnTesteFallback");
   const btnCopiar = el("btnCopiar");
   const preview = el("preview");
+  const btnGuru = document.getElementById('btnGuruPopup');
 
   // Valor padrão: hoje
   (function initDate() {
@@ -115,6 +116,13 @@ document.addEventListener("DOMContentLoaded", function() {
   if (btnProcessarIA) {
     btnProcessarIA.addEventListener("click", () => handleProcessing("/processar-dou-ia"));
   }
+  if (btnGuru) {
+    btnGuru.addEventListener('click', () => {
+        const url = "https://chatgpt.com/g/g-694097bd22ac819192af5884a4e7f223-analise-do-dou";
+        // Abre uma janela de 500x700 (estilo chat lateral)
+        window.open(url, 'GuruOrcamentario', 'width=500,height=750,scrollbars=yes,resizable=yes');
+    });
+}
   if (btnProcessarValor) {
     btnProcessarValor.addEventListener("click", () => handleProcessing("/processar-valor-ia"));
   }
