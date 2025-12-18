@@ -1,5 +1,5 @@
 ## Nome do arquivo: run_check.py
-# Versão: 18.0 (Modo Heartbeat + Horário Estendido)
+# Versão: 18.1 (Legislativo Automático + Heartbeat)
 
 import asyncio
 import json
@@ -61,7 +61,7 @@ except ImportError:
     print("Aviso: 'dou_fallback.py' não encontrado. Redundância desativada.")
     executar_fallback = None
 
-# ... outros imports
+# Importa funções do Legislativo
 try:
     from check_legislativo import check_tramitacoes_watchlist, check_and_process_legislativo
 except ImportError:
@@ -117,8 +117,6 @@ async def check_and_process_dou(today_str: str):
     fallback_marker = f"FALLBACK_DONE_{today_str}"
     if fallback_marker in processed_zips_today:
         print("Modo Fallback já foi executado com sucesso hoje. Pulando.")
-        # Se quiser avisar que pulou pois já fez fallback:
-        # await send_telegram_message(f"ℹ️ DOU {today_str}: Verificação pulada (Fallback já realizado hoje).")
         return
 
     pubs_finais: List[Publicacao] = []
@@ -258,8 +256,6 @@ async def check_and_process_dou(today_str: str):
         return
 
     print(f"Enviando {len(pubs_finais)} matérias para análise da IA...")
-    # Opcional: Avisar que está analisando
-    # await send_telegram_message(f"🧠 Analisando {len(pubs_finais)} matérias com IA...")
     
     pubs_ready = []
     tasks = []
@@ -322,6 +318,9 @@ async def main_loop():
     pac_check_done = False
     last_day = None
     
+    # Controle de execução horária do Legislativo
+    legis_last_run_hour = None
+    
     print("--- Robô Integrado (Safety Mode + Heartbeat) Iniciado ---")
 
     while True:
@@ -329,26 +328,7 @@ async def main_loop():
         hoje_str = agora.strftime('%Y-%m-%d')
         ano_str = agora.strftime('%Y')
         ontem_str = (agora - timedelta(days=1)).strftime('%Y-%m-%d')
-        current_hour_str = agora.strftime('%H')
-            
-            # Variável de controle (adicione 'legis_last_run_hour = None' antes do while)
-            if 'legis_last_run_hour' not in locals():
-                legis_last_run_hour = None
-
-            if is_weekday and agora.minute >= 30 and legis_last_run_hour != current_hour_str:
-                try:
-                    print(f"--- Iniciando Check Legislativo ({agora.strftime('%H:%M')}) ---")
-                    # 1. Verifica tramitações da Watchlist (Envia Telegram se mudar)
-                    await check_tramitacoes_watchlist()
-                    
-                    # 2. (Opcional) Busca novos projetos gerais de interesse
-                    # await check_and_process_legislativo(only_new=True) 
-                    
-                    legis_last_run_hour = current_hour_str # Marca que já rodou nesta hora
-                    print("--- Check Legislativo Finalizado ---")
-                except Exception as e:
-                    print(f"Erro Legislativo: {e}")
-                    
+        
         # Reseta flags diárias
         if last_day != hoje_str:
             valor_check_done = False
@@ -356,7 +336,6 @@ async def main_loop():
             last_day = hoje_str
             print(f"*** Novo dia: {hoje_str} ***")
 
-        # Horário de expediente EXPANDIDO (04h às 23h59)
         # Horário de expediente (04h às 23h59)
         if 4 <= agora.hour <= 23:
             
@@ -384,6 +363,24 @@ async def main_loop():
                     pac_check_done = True
                 except Exception as e:
                     print(f"Erro PAC: {e}")
+
+            # 4. LEGISLATIVO (Rodar a cada 60 min, ex: XX:30)
+            # Verifica apenas em dias úteis, para economizar recursos no fim de semana
+            current_hour_str = agora.strftime('%H')
+            if is_weekday and agora.minute >= 30 and legis_last_run_hour != current_hour_str:
+                try:
+                    print(f"--- Iniciando Check Legislativo ({agora.strftime('%H:%M')}) ---")
+                    
+                    # Verifica atualizações na Watchlist (e avisa no Telegram se mudar)
+                    await check_tramitacoes_watchlist()
+                    
+                    # (Opcional) Verifica novos projetos gerais
+                    # await check_and_process_legislativo(only_new=True) 
+                    
+                    legis_last_run_hour = current_hour_str # Marca que já rodou nesta hora
+                    print("--- Check Legislativo Finalizado ---")
+                except Exception as e:
+                    print(f"Erro Legislativo: {e}")
 
         else:
             print(f"[{agora.strftime('%H:%M')}] Fora de expediente. Dormindo.")
