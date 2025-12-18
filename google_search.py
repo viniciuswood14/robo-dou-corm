@@ -1,15 +1,12 @@
 # Nome do arquivo: google_search.py
-# Versão: 14.0.5 (Busca por data exata)
+# Versão: 14.1 (Busca Ampla no Valor)
 
 import httpx
 import os
 from typing import List, Dict, Optional
 
-# ... (Configuração do GOOGLE_API_KEY e GOOGLE_CX_ID permanece igual) ...
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GOOGLE_CX_ID = os.environ.get("GOOGLE_CX_ID")
-# --------------------------------------------------------------------------
-
 
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
@@ -27,39 +24,37 @@ class SearchResult(dict):
     def snippet(self) -> str:
         return self.get("snippet", "").replace("\n", " ")
 
-# --- [MODIFICAÇÃO v14.0.5] ---
 async def perform_google_search(query: str, search_date: str) -> List[SearchResult]:
     """
     Busca no Google CSE por uma query, filtrando por data EXATA.
-    
-    :param query: Termos de busca
-    :param search_date: Data no formato YYYY-MM-DD
+    Agora busca em TODO o site do Valor, não apenas no /impresso.
     """
     if not GOOGLE_API_KEY or not GOOGLE_CX_ID:
         print("Erro: GOOGLE_API_KEY ou GOOGLE_CX_ID não configurados.")
         return []
 
-    # A API do Google usa 'sort=date:r:YYYYMMDD:YYYYMMDD' para um dia específico
     try:
         # Converte "YYYY-MM-DD" para "YYYYMMDD"
         date_yyyymmdd = search_date.replace("-", "")
+        # O filtro date:r restringe resultados àquela data de publicação específica
         date_sort_param = f"date:r:{date_yyyymmdd}:{date_yyyymmdd}"
     except Exception as e:
         print(f"Data inválida fornecida para busca: {search_date}. Erro: {e}")
         return []
 
-    # Removemos o "after:" da query e usamos o parâmetro 'sort'
-    full_query = f"{query} site:valor.globo.com/impresso"
+    # --- [CORREÇÃO AQUI] ---
+    # Removemos o "/impresso" para pegar notícias em tempo real (Home, Finanças, Política)
+    # Isso garante que pegaremos qualquer matéria do dia, não só a edição fechada.
+    full_query = f"{query} site:valor.globo.com"
     
     params = {
         "key": GOOGLE_API_KEY,
         "cx": GOOGLE_CX_ID,
         "q": full_query,
-        "num": 10, # Limita a 10 resultados
-        "sort": date_sort_param # Adiciona o filtro de data exata
+        "num": 10, 
+        "sort": date_sort_param 
     }
     
-    # ... (o resto da função permanece igual) ...
     results = []
     try:
         async with httpx.AsyncClient() as client:
@@ -80,4 +75,3 @@ async def perform_google_search(query: str, search_date: str) -> List[SearchResu
     except Exception as e:
         print(f"Exceção ao buscar no Google: {e}")
         return []
-# --- [FIM DA MODIFICAÇÃO v14.0.5] ---
