@@ -503,6 +503,13 @@ PROGRAMAS_ACOES_PAC = {
 
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     try:
+        # Evita que o tráfego para o SIOP passe por proxies corporativos que bloqueiam o túnel.
+        no_proxy_hosts = ["www1.siop.planejamento.gov.br", "siop.planejamento.gov.br", "orcamento.dados.gov.br"]
+        for var in ("NO_PROXY", "no_proxy"):
+            current = os.environ.get(var, "")
+            extras = ",".join(h for h in no_proxy_hosts if h not in current)
+            os.environ[var] = ",".join(filter(None, [current, extras]))
+
         df_detalhado = await asyncio.to_thread(despesa_detalhada, exercicio=ano, acao=acao_cod, inclui_descricoes=True, ignore_secure_certificate=True)
         if df_detalhado.empty: return None
         cols_possiveis = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel', 'saldo_disponivel', 'saldo_dotacao']
@@ -511,9 +518,12 @@ async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, A
         totais = df_detalhado[colunas].sum().to_dict()
         totais['Acao_cod'] = acao_cod
         if 'dotacao_disponivel' not in totais:
-             totais['dotacao_disponivel'] = totais.get('saldo_disponivel') or totais.get('saldo_dotacao') or 0.0
+            totais['dotacao_disponivel'] = totais.get('saldo_disponivel') or totais.get('saldo_dotacao') or 0.0
         return totais
-    except: return None
+    except Exception as e:
+        err_msg = f"[PAC] Falha ao consultar SIOP para ação {acao_cod} ({ano}): {e}"
+        print(err_msg)
+        raise RuntimeError(err_msg) from e
  
 @app.get("/api/pac-data/historical-dotacao")
 async def get_pac_historical():
@@ -531,8 +541,14 @@ async def get_pac_data(ano: int = Path(..., ge=2010, le=2025)):
     tasks = []
     for prog, acoes in PROGRAMAS_ACOES_PAC.items():
         for acao in acoes.keys(): tasks.append(buscar_dados_acao_pac(ano, acao))
-    results = await asyncio.gather(*tasks)
-    dados = [r for r in results if r]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [r for r in results if isinstance(r, Exception)]
+    dados = [r for r in results if not isinstance(r, Exception) and r]
+    if errors:
+        err_msgs = "; ".join(dict.fromkeys(str(e) for e in errors))
+        print(f"[PAC] Erros ao consultar SIOP: {err_msgs}")
+        if not dados:
+            raise HTTPException(status_code=502, detail=f"Falha ao consultar SIOP: {err_msgs}")
     if not dados: return []
 
     tabela = []
