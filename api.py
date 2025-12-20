@@ -503,6 +503,13 @@ PROGRAMAS_ACOES_PAC = {
 
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     try:
+        # Evita que o tráfego para o SIOP passe por proxies corporativos que bloqueiam o túnel.
+        no_proxy_hosts = ["www1.siop.planejamento.gov.br", "siop.planejamento.gov.br", "orcamento.dados.gov.br"]
+        for var in ("NO_PROXY", "no_proxy"):
+            current = os.environ.get(var, "")
+            extras = ",".join(h for h in no_proxy_hosts if h not in current)
+            os.environ[var] = ",".join(filter(None, [current, extras]))
+
         df_detalhado = await asyncio.to_thread(despesa_detalhada, exercicio=ano, acao=acao_cod, inclui_descricoes=True, ignore_secure_certificate=True)
         if df_detalhado.empty: return None
         cols_possiveis = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel', 'saldo_disponivel', 'saldo_dotacao']
