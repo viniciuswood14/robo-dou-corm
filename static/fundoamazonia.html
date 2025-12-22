@@ -384,12 +384,12 @@
             <p class="text-blue-200 mb-2 font-medium">Marinha do Brasil &copy; 2025</p>
             <p class="text-blue-300 text-xs opacity-70">
                 Fontes: "Resumo das Metas.docx" e Mensagens SGERAL/ARMADA (2023-2024).<br>
-                
+                Este painel é um instrumento de visualização gerado por IA para apoio à decisão.
             </p>
         </div>
     </footer>
 
-    <!-- Toast Notification Element -->
+    <!-- Toast Notification Element (Mantido apenas para visual, opcional) -->
     <div id="toast"></div>
 
     <script>
@@ -419,20 +419,6 @@
             } else {
                 path9.style.opacity = '1'; path4.style.opacity = '1';
             }
-        }
-
-        // --- SIMULATE DOCUMENT OPENING ---
-        function openDocument(docRef) {
-            const toast = document.getElementById("toast");
-            toast.innerHTML = `<i class="fa-solid fa-folder-open mr-2"></i> Abrindo documento: <strong>${docRef}</strong>...`;
-            toast.classList.add("show");
-            
-            // Log to console for debugging
-            console.log("Simulando abertura do documento:", docRef);
-
-            // Hide after 3 seconds
-            setTimeout(function(){ toast.className = toast.className.replace("show", ""); }, 3000);
-            return false; // Prevent default link behavior
         }
 
         // --- TIMELINE DATA (UPDATED) ---
@@ -580,8 +566,9 @@
                     <div class="mt-auto pt-3 border-t border-slate-100">
                         <p class="text-xs text-slate-500 mb-2 italic">"${event.details}"</p>
                         
-                        <!-- Clickable Document Link -->
-                        <a href="#" onclick="return openDocument('${event.doc}')" class="group/link flex items-center gap-2 text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 p-2 rounded transition-colors w-full justify-center">
+                        <!-- REAL DOCUMENT LINK -->
+                        <!-- href is now set to the actual filename. target="_blank" opens in new tab. -->
+                        <a href="${event.doc}" target="_blank" class="group/link flex items-center gap-2 text-[11px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 p-2 rounded transition-colors w-full justify-center">
                             <i class="fa-solid fa-file-pdf"></i>
                             <span class="group-hover/link:underline truncate max-w-[180px]">${event.doc}</span>
                         </a>
