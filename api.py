@@ -604,3 +604,21 @@ async def test_ia():
 if os.path.isdir("static"):
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
 else: print("⚠️ Pasta 'static' não encontrada.")
+
+@app.get("/teste-conexao-siop")
+async def teste_conexao():
+    import httpx
+    urls = [
+        "https://www1.siop.planejamento.gov.br/acesso/",
+        "https://www.portaltransparencia.gov.br/",
+        "https://google.com" # Controle
+    ]
+    resultados = {}
+    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+        for url in urls:
+            try:
+                r = await client.get(url)
+                resultados[url] = f"Status: {r.status_code}"
+            except Exception as e:
+                resultados[url] = f"Erro: {str(e)}"
+    return resultados
