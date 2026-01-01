@@ -527,7 +527,7 @@ async def get_pac_historical():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pac-data/{ano}")
-async def get_pac_data(ano: int = Path(..., ge=2010, le=2025)):
+async def get_pac_data(ano: int = Path(..., ge=2010, le=2030)):
     tasks = []
     for prog, acoes in PROGRAMAS_ACOES_PAC.items():
         for acao in acoes.keys(): tasks.append(buscar_dados_acao_pac(ano, acao))
