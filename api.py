@@ -503,17 +503,24 @@ PROGRAMAS_ACOES_PAC = {
 
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
     try:
+        print(f"🔄 Tentando buscar dados do SIOP para {acao_cod} no ano {ano}...") # Log de início
+        
+        # Sua linha original
         df_detalhado = await asyncio.to_thread(despesa_detalhada, exercicio=ano, acao=acao_cod, inclui_descricoes=True, ignore_secure_certificate=True)
-        if df_detalhado.empty: return None
-        cols_possiveis = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel', 'saldo_disponivel', 'saldo_dotacao']
-        colunas = [c for c in cols_possiveis if c in df_detalhado.columns]
-        if not colunas: return None
-        totais = df_detalhado[colunas].sum().to_dict()
-        totais['Acao_cod'] = acao_cod
-        if 'dotacao_disponivel' not in totais:
-             totais['dotacao_disponivel'] = totais.get('saldo_disponivel') or totais.get('saldo_dotacao') or 0.0
-        return totais
-    except: return None
+        
+        if df_detalhado.empty:
+            print(f"⚠️ SIOP retornou DataFrame VAZIO para {acao_cod}")
+            return None
+
+        # ... (resto do código de soma) ...
+        return totais.to_dict()
+
+    except Exception as e:
+        # AQUI ESTÁ O SEGREDO: Imprimir o erro real
+        print(f"❌ ERRO CRÍTICO SIOP ({acao_cod}): {type(e).__name__} - {str(e)}")
+        import traceback
+        traceback.print_exc() # Imprime a trilha completa do erro
+        return None
  
 @app.get("/api/pac-data/historical-dotacao")
 async def get_pac_historical():
