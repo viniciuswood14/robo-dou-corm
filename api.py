@@ -601,10 +601,6 @@ async def test_ia():
         return {"ok": True, "resp": r.text}
     except Exception as e: return {"ok": False, "err": str(e)}
 
-if os.path.isdir("static"):
-    app.mount("/", StaticFiles(directory="static", html=True), name="static")
-else: print("⚠️ Pasta 'static' não encontrada.")
-
 @app.get("/teste-conexao-siop")
 async def teste_conexao():
     import httpx
@@ -622,3 +618,9 @@ async def teste_conexao():
             except Exception as e:
                 resultados[url] = f"Erro: {str(e)}"
     return resultados
+
+if os.path.isdir("static"):
+    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+else: print("⚠️ Pasta 'static' não encontrada.")
+
+
