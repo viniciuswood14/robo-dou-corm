@@ -1,0 +1,32 @@
+name: Atualizar PAC SIOP
+on:
+  schedule:
+    - cron: '0 9 * * *' # Roda todo dia às 06:00 da manhã (Brasília)
+  workflow_dispatch: # Permite rodar manualmente clicando num botão se quiser
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar Dependências
+        run: |
+          pip install pandas orcamentobr aiohttp httpx
+
+      - name: Rodar Coleta SIOP
+        run: python coleta_automatica.py
+
+      - name: Commit e Push dos Dados
+        run: |
+          git config --global user.name 'Robo DOU Automático'
+          git config --global user.email 'robo@marinha.br'
+          git add pac_cache_*.json
+          git commit -m "Automação: Atualização diária PAC SIOP" || echo "Sem mudanças"
+          git push
