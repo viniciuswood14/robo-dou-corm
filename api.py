@@ -502,24 +502,57 @@ PROGRAMAS_ACOES_PAC = {
 }
 
 async def buscar_dados_acao_pac(ano: int, acao_cod: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca dados do PAC.
+    Prioridade 1: Ler do cache local (gerado pelo GitHub Actions) para evitar bloqueio.
+    Prioridade 2: Tentar conexão direta (apenas se não houver cache).
+    """
+    # 1. TENTA LER DO ARQUIVO JSON (ESTRATÉGIA ANTI-BLOQUEIO)
+    arquivo_cache = f"pac_cache_{ano}.json"
+    
+    if os.path.exists(arquivo_cache):
+        try:
+            # Abre o arquivo que o GitHub Actions gerou/atualizou
+            with open(arquivo_cache, "r", encoding="utf-8") as f:
+                dados_cache = json.load(f)
+                
+                # Se a ação (ex: 123G) estiver no arquivo, retorna os dados
+                if acao_cod in dados_cache:
+                    # print(f"📂 Cache local usado: {acao_cod} ({ano})")
+                    return dados_cache[acao_cod]
+        except Exception as e:
+            print(f"⚠️ Erro ao ler cache local ({arquivo_cache}): {e}")
+
+    # 2. FALLBACK: TENTA CONEXÃO DIRETA (CASO O ARQUIVO NÃO EXISTA)
+    # Isso só vai funcionar se o bloqueio do Render for removido um dia.
     try:
-        print(f"🔄 Tentando buscar dados do SIOP para {acao_cod} no ano {ano}...") # Log de início
-        
-        # Sua linha original
-        df_detalhado = await asyncio.to_thread(despesa_detalhada, exercicio=ano, acao=acao_cod, inclui_descricoes=True, ignore_secure_certificate=True)
+        print(f"🔄 Tentando conexão direta SIOP para {acao_cod} ({ano})...")
+        df_detalhado = await asyncio.to_thread(
+            despesa_detalhada, 
+            exercicio=ano, 
+            acao=acao_cod, 
+            inclui_descricoes=True, 
+            ignore_secure_certificate=True
+        )
         
         if df_detalhado.empty:
-            print(f"⚠️ SIOP retornou DataFrame VAZIO para {acao_cod}")
             return None
 
-        # ... (resto do código de soma) ...
-        return totais.to_dict()
+        # Recalcula totais (lógica original)
+        cols = ['loa', 'loa_mais_credito', 'empenhado', 'liquidado', 'pago', 'dotacao_disponivel']
+        valid_cols = [c for c in cols if c in df_detalhado.columns]
+        totais = df_detalhado[valid_cols].sum().to_dict()
+        
+        # Garante campo calculado
+        if 'dotacao_disponivel' not in totais:
+            totais['dotacao_disponivel'] = totais.get('loa_mais_credito', 0.0) - totais.get('empenhado', 0.0)
+            
+        totais['Acao_cod'] = acao_cod
+        return totais
 
     except Exception as e:
-        # AQUI ESTÁ O SEGREDO: Imprimir o erro real
-        print(f"❌ ERRO CRÍTICO SIOP ({acao_cod}): {type(e).__name__} - {str(e)}")
-        import traceback
-        traceback.print_exc() # Imprime a trilha completa do erro
+        # Silencia o erro no log para não poluir, já que sabemos que está bloqueado
+        # print(f"❌ Falha SIOP Direto ({acao_cod}): {e}")
         return None
  
 @app.get("/api/pac-data/historical-dotacao")
