@@ -2,46 +2,46 @@
   "123G": {
     "loa": 195527526,
     "loa_mais_credito": 195527526,
-    "empenhado": 60906562,
-    "liquidado": 54640615,
+    "empenhado": 97005416,
+    "liquidado": 54645326,
     "pago": 53179282,
     "Acao_cod": "123G",
-    "dotacao_disponivel": 134620964
+    "dotacao_disponivel": 98522110
   },
   "123H": {
     "loa": 235102387,
     "loa_mais_credito": 235102387,
-    "empenhado": 82947448,
-    "liquidado": 22324942,
-    "pago": 22293105,
+    "empenhado": 109319514,
+    "liquidado": 22408398,
+    "pago": 22370835,
     "Acao_cod": "123H",
-    "dotacao_disponivel": 152154939
+    "dotacao_disponivel": 125782873
   },
   "123I": {
     "loa": 281776895,
     "loa_mais_credito": 281776895,
-    "empenhado": 82888968,
-    "liquidado": 80864995,
-    "pago": 79972820,
+    "empenhado": 85579168,
+    "liquidado": 80922203,
+    "pago": 80027396,
     "Acao_cod": "123I",
-    "dotacao_disponivel": 198887927
+    "dotacao_disponivel": 196197727
   },
   "14T7": {
     "loa": 776782534,
     "loa_mais_credito": 776782534,
-    "empenhado": 60209312,
-    "liquidado": 32557875,
-    "pago": 27893707,
+    "empenhado": 121705278,
+    "liquidado": 32430650,
+    "pago": 27922715,
     "Acao_cod": "14T7",
-    "dotacao_disponivel": 716573222
+    "dotacao_disponivel": 655077256
   },
   "1N47": {
     "loa": 162360344,
     "loa_mais_credito": 162360344,
-    "empenhado": 40181018,
+    "empenhado": 40133435,
     "liquidado": 4726844,
     "pago": 3768648,
     "Acao_cod": "1N47",
-    "dotacao_disponivel": 122179326
+    "dotacao_disponivel": 122226909
   }
 }
